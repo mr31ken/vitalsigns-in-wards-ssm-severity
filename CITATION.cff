@@ -1,0 +1,19 @@
+cff-version: 1.2.0
+message: "If you use this code, please cite the article and this software."
+title: "Analysis code: latent severity from sparse ward vital signs (state-space model)"
+version: 1.0.0
+license: MIT
+repository-code: "https://github.com/mr31ken/ward-vitals-state-space-severity"
+authors:
+  - family-names: Fukuyama
+    given-names: Keita
+    affiliation: "Kyoto University"
+  - family-names: Saito
+    given-names: Kenichi
+    affiliation: "Kyoto University"
+keywords:
+  - state-space model
+  - vital signs
+  - respiratory rate
+  - patient deterioration
+  - Stan

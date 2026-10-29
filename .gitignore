@@ -1,0 +1,17 @@
+# Data and model outputs are never committed (personal health information)
+*.rds
+*.RData
+*.rda
+*.csv
+*.xlsx
+*.html
+*.log
+figs/
+figs_*/
+**/dat/*
+!**/dat/README.md
+# OS / editor
+.DS_Store
+._*
+.Rhistory
+.Rproj.user/

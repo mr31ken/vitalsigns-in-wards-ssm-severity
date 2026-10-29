@@ -1,0 +1,578 @@
+---
+title: "p7_vit_dist_state_models_v2_compe_eval"
+author: "fk506cni"
+date: "2024-11-02"
+output: html_document
+editor_options: 
+  chunk_output_type: console
+---
+
+
+```{r}
+require(tidyverse)
+require(openxlsx)
+require(jsonlite)
+require(officer)
+require(ggpubr)
+# require(IRdisplay)
+require(data.table)
+require(lubridate)
+require(repr)
+require(tictoc)
+
+require(RColorBrewer)
+require(viridis)
+require(lawstat)
+
+require(rstan)
+library(ggfortify)
+library(gghighlight)
+library(bayesplot)
+# require(pROC)
+library(ROCR)
+```
+
+```{r}
+ts <- Sys.time()  %>% 
+    as.character() %>% 
+    str_remove_all(., "[-:]*") %>% 
+    str_replace(.," ", "_")
+ts
+```
+
+```{r}
+outputdir <- "./figs/"
+if(!dir.exists(outputdir)){
+  dir.create(outputdir)
+}
+
+ggsave2_tri <- function(plot, wid = 9, hei=9){
+  plot_name <- deparse(substitute(plot))
+  
+  #png
+  file_name <- paste(outputdir,plot_name, ".png", sep = "",collapse = "")
+  ggsave(filename = file_name,plot = plot,device = "png",width = wid, height = hei,dpi = 300,units = "cm")
+  
+  
+  #pdf
+  file_name <- paste(outputdir,plot_name, ".pdf", sep = "",collapse = "")
+  # ggsave(filename = file_name,plot = plot,device = "pdf",width = wid, height = hei,dpi = 300,units = "cm")
+  
+  #pptx
+  file_name <- paste(outputdir,plot_name, ".pptx", sep = "",collapse = "")
+  plot_ed <- rvg::dml(ggobj = plot,width = wid, height = hei)
+  
+  doc <- read_pptx() %>%
+    add_slide('Title and Content', 'Office Theme') %>%
+    ph_with(value = "", location = ph_location_type(type = "title")) %>%
+    ph_with(value = plot_ed, location = ph_location(type = "body",width = cm2inch(wid), height = cm2inch(hei),left = 2, top = 2))
+  doc %>%
+    print(target = file_name)
+  
+}
+
+
+
+inch2cm <- function(x){
+  return(x/0.39370)
+}
+cm2inch <- function(x){
+  return(0.39370*x)
+}
+
+p2cm <- function(x){
+  return(as.integer(0.008466666666666667 * x))
+}
+
+cm2p <- function(x){
+  return(as.integer(118.11023622047244 *x))
+}
+
+append_list <- function(l, x){
+  xname  <- deparse(substitute(x))
+  l[[xname]] <- x
+  return(l)
+}
+
+# load function
+get_vals <- function(l){
+  lnames <- names(l)
+  for(n in lnames){
+    assign(n, l[[n]], pos = .GlobalEnv)
+  }
+  return(lnames)
+}
+```
+
+
+```{r}
+fs <- list.files("./", pattern = "res_list.rds", full.names = T) %>% 
+  sort() %>% 
+  .[1:5]
+fs
+```
+
+```{r}
+f3_in <- "../p2_unplanned_ICUadmission/dat/icu_target20240517_044716.297905.rds"
+df_icu_target <- readRDS(f3_in)
+
+
+f_adm <- "../p2_unplanned_ICUadmission/dat/admit_col78_20241019_005911_315947.csv"
+df_adm_lim <- read_csv(f_adm) %>% 
+  select(-starts_with("INPUT")) %>%
+  select(-starts_with("CANCEL")) %>%
+  select(-starts_with("UPDATE")) %>% 
+  mutate(DISCHARGE_DATE = if_else(
+    is.na(DISCHARGE_DATE),
+    lubridate::ymd("20241019"),
+    DISCHARGE_DATE
+  ) %>% 
+    as_datetime()) %>% 
+  group_by(PT_ID) %>% 
+  summarise(last_date_hosp = max(DISCHARGE_DATE)) %>% 
+  mutate(org = "adm")
+
+f_book <- "../p2_unplanned_ICUadmission/dat/book_col57_20241019_005911_315947.csv"
+df_book_lim <- read_csv(f_book) %>% 
+  select(-starts_with("INPUT")) %>%
+  select(-starts_with("UPDATE")) %>% 
+  filter(ACTUAL_TYPE =="実績") %>% 
+  filter(is.na( CANCEL_DATE)) %>% 
+  mutate(BOOK_DATE = BOOK_DATE%>% 
+    as_datetime()) %>% 
+  group_by(PT_ID) %>% 
+  summarise(last_date_hosp = max(BOOK_DATE)) %>% 
+  mutate(org = "book")
+
+df_follow_dwh <- bind_rows(df_adm_lim,
+                           df_book_lim) %>% 
+  group_by(PT_ID) %>% 
+  summarise(last_date_hosp = max(last_date_hosp))
+```
+
+```{r}
+# f_prof <- "../p2_unplanned_ICUadmission/dat/ptprof_col24_20241017_025001_579087.csv"
+# df_prof <- read_csv(f_prof) %>% 
+#   dplyr::select(PT_ID, DEATH_DATE) %>% 
+#   rename(deathdate =DEATH_DATE) %>% 
+#   mutate(deathdate = lubridate::as_datetime(deathdate))
+
+f_prof <- "../p2_unplanned_ICUadmission/dat/ptprof_col25_20241201_031325_735194.csv"
+df_prof <- read_csv(f_prof) %>% 
+  dplyr::select(PT_ID, DEATH_DATE, OTHER) %>%
+  mutate(dts = str_extract(OTHER, pattern="死亡時刻：[0-9]*$") 
+         %>%
+           str_remove(.,pattern="死亡時刻：")
+         )  %>% 
+  mutate(dts= case_when(
+    is.na(DEATH_DATE)~ NA_character_,
+    !is.na(DEATH_DATE) & is.na(dts) ~ "120000",
+    T~dts)) %>% 
+  mutate(deathdate =str_c(as.character(DEATH_DATE), dts, sep=" ")) %>%
+  mutate(deathdate = lubridate::ymd_hms(deathdate) %>% 
+           as_datetime())
+
+```
+
+
+```{r}
+df_icu_target %>% 
+  filter(!PT_ID %in% df_prof$PT_ID) %>% nrow()
+```
+
+```{r}
+df_icu_target_wd <- df_icu_target %>% 
+  left_join(df_prof, by="PT_ID") %>% 
+  left_join(df_follow_dwh, by="PT_ID") %>% 
+  mutate(event = if_else(is.na(deathdate), 0, 1),
+         time_to_event = case_when(
+           is.na(deathdate)~last_date_hosp -ADM_DT,
+           deathdate -ADM_DT < 0~disc_u_DT -ADM_DT,
+           T ~deathdate -ADM_DT
+         ) %>% 
+           as.numeric() %>% 
+           magrittr::divide_by(60*60*24)) %>% 
+  mutate(death_in_30days= time_to_event <= 30 & event == 1) %>% 
+  mutate(death_in_7days= time_to_event <= 7 & event == 1) %>% 
+  select(event, time_to_event,
+         disc_outcome,
+         disc_u_finalstate,death_in_30days,
+         everything())
+
+
+df_icu_target_wd$event %>% table()
+```
+
+```{r}
+
+df_icu_target_wd %>% 
+  write.xlsx(., "./df_icu_target_wd.xlsx")
+```
+
+
+```{r}
+cols_eval <- c(
+  # "AP3score",
+  # "AP2score",
+  # "SP2score",
+  "LOS",
+  "log2_LOS",
+  "death_in_30days",
+  "death_in_7days"
+  # "disc_u_outcome"
+)
+
+cols_need <- c(
+  "JIPAD_ID",
+  "event",
+  "time_to_event",
+  "damage_intercept",
+  "damage_slope"
+)
+```
+
+
+
+```{r}
+add_3_list <- function(l_){
+  l_ <- list()
+  l_ <- list()
+  l_ <- list()
+  return(l_)
+}
+l_coef <- list() %>% 
+  add_3_list()
+
+l_roc <- list() %>% 
+  add_3_list()
+
+l_proc <- list() %>% 
+  add_3_list()
+
+l_models <- list() %>% 
+  add_3_list()
+
+l_data <- list() %>% 
+  add_3_list()
+
+l_auc <- list() %>% 
+  add_3_list()
+
+for(i in 1:length(fs)){
+  tic()
+  f_in_l <- fs[[i]]
+  print(f_in_l)
+  
+  xtag <- f_in_l %>% 
+    str_remove(".//ssm_801_4_redvar_rs_") %>% 
+    str_extract("^[a-zA-Z]*")
+  
+  readRDS(f_in_l) %>%
+    get_vals()
+  
+  res <- ft1 %>% 
+    rstan::extract() 
+
+  ft1 %>% rhat() %>% mcmc_rhat()
+  
+  
+  df_j_ijdt_res <- df_j_ijdt %>% 
+  mutate(
+         estim_dmg = 
+           res$dmg_ijs %>% 
+           apply(., 2, mean)
+         )
+
+
+
+  df_j_res <- df_j %>% 
+    mutate(
+           estim_phi = 
+             res$phi_ijs %>% 
+             apply(., 2, mean))  %>% 
+  
+    left_join(
+      df_j_ijdt_res %>% 
+        select(ind_i, ind_j, ind_ij, estim_dmg),
+      by=c("ind_i", "ind_j", "ind_ij")
+    )
+
+  
+  df_icu_target_lim <- df_icu_target_wd %>% 
+    mutate(LOS = as.numeric(difftime(disc_u_DT, ADM_DT, units = "secs")) / 60 / 60) %>%
+    mutate(log2_LOS = log2(LOS)) %>% 
+    mutate(disc_u_outcome = ifelse(disc_u_finalstate == "死亡", 1, 0)) %>% 
+    dplyr::select(one_of(
+      cols_need,
+      cols_eval))
+  
+  
+  df_icu_target_lim_na <- df_icu_target_lim %>% 
+  filter(is.na(LOS))
+  
+  df_j_res_me <- df_j_res %>% 
+    dplyr::select(
+      JIPAD_ID,
+      estim_dmg,
+      # event,
+      # time_to_event,
+      delta_obs_time_cmp,
+      next_obs_time_cmp,
+      hrs
+    ) %>% 
+    # group_by(JIPAD_ID) %>%
+    filter(hrs <= 24) %>% 
+    mutate(nhrs = -hrs)
+  
+  
+  p_tr <- ggplot()+
+        theme_pubr(legend="none")+
+      theme(aspect.ratio = 1)+
+    geom_line(data=df_j_res_me,
+               aes(x=nhrs,y=estim_dmg, group=JIPAD_ID, color=JIPAD_ID))+
+    ggtitle(xtag)
+  
+  p_tr %>% 
+    grid::grid.draw()
+
+  
+  m <- lme4::lmer(estim_dmg ~ nhrs + (1 +nhrs|JIPAD_ID) , data = df_j_res_me )
+  # m <- nlme::lme(estim_dmg ~ nhrs|JIPAD_ID, data = df_j_res_me )
+  m %>% print()
+  
+  m_smr <- m %>% 
+  summary()
+  
+  m_smr %>% print()
+  
+  df_me_smr <- m %>% coef() %>% .[[1]] %>% as.data.frame() %>% 
+    mutate(JIPAD_ID = rownames(.)) %>% 
+    `colnames<-`(c("damage_intercept", "damage_slope", "JIPAD_ID"))
+  # df_me_smr 
+  
+  df_j_res_last_range <- df_j_res %>% 
+    dplyr::select(
+      JIPAD_ID,
+      estim_dmg,
+      # event,
+      # time_to_event,
+      delta_obs_time_cmp,
+      next_obs_time_cmp,
+      hrs
+    ) %>% 
+    # group_by(JIPAD_ID) %>%
+    filter(hrs <= 24) %>%
+    mutate(estim_dmg_area = estim_dmg * next_obs_time_cmp) %>% 
+    group_by(JIPAD_ID) %>%
+    summarise(n_obs=n(),
+              estim_mean_dmg = sum(estim_dmg_area)/sum(next_obs_time_cmp)) %>%  
+  # %>%    
+  # summarise(n_obs=n(),
+  #           estim_mean_dmg = mean(estim_dmg)) %>%
+  # filter(min(hrs) == hrs) %>%
+  # mutate(estim_mean_dmg = estim_dmg) %>%
+    dplyr::distinct() %>% 
+    left_join(df_icu_target_lim,
+              by="JIPAD_ID") %>% 
+    left_join(df_me_smr, by="JIPAD_ID")
+
+
+  
+  
+  for( dmg in c("estim_mean_dmg"
+    # ,"damage_intercept",
+    # "damage_slope"
+      )){
+      for (ev in c("death_in_30days", "death_in_7days")){
+        print(f_in_l)
+        print(ev)
+        xlab <- dmg
+        df_j_res_last_range[["x"]] <- df_j_res_last_range[[dmg]]
+        df_j_res_last_range[["y"]] <- df_j_res_last_range[[ev]]
+      
+      p_ev <- ggplot()+
+        theme_pubr(legend="none")+
+        theme(aspect.ratio = 1)+
+        geom_histogram(data = df_j_res_last_range,
+                       aes(x=x),
+                       position = "identity",
+                       bins=25)+
+        xlab(ev)+
+        coord_cartesian(expand = F)+
+        ggtitle(xtag)
+      
+      grid::grid.draw(p_ev)
+      
+      p_long_ev <- ggplot()+
+        theme_pubr()+
+        theme(aspect.ratio = 1)+
+        geom_point(data = df_j_res_last_range,
+                  aes(x=x,
+                      y=y,
+                      # group=JIPAD_ID,
+                      # color=y
+                      ))+
+        # coord_cartesian(expand = F)+
+        # scale_x_log10()+scale_y_log10()+
+        # scale_colour_viridis(option = "viridis") +
+        # scale_fill_viridis(option = "viridis")+
+        labs(color=ev)+xlab(xlab)+ylab(ev)+
+        ggtitle(xtag)
+      # +
+        # facet_wrap(~categ, ncol = 1,scale="free")
+    
+      grid::grid.draw(p_long_ev)
+      
+      
+      if(ev %in% c(
+        # "disc_u_outcome",
+        "death_in_30days", "death_in_7days")){
+        
+        print(ev)
+        df_j_res_last_range_fix <- df_j_res_last_range %>% 
+                         mutate(y = if_else(
+                           y == 1,
+                           "death_in",
+                           "survival"
+                         ))
+        x1 <- df_j_res_last_range_fix %>% 
+          filter(y=="death_in") %>% 
+          .[["x"]]
+        x2 <- df_j_res_last_range_fix %>% 
+          filter(y=="survival") %>% 
+          .[["x"]]
+        # print(x1)
+        # print(x2)
+        exactRankTests::wilcox.exact(x = x1, y=x2, paired=F) %>% print()
+        # brunner.munzel.test(x1, x2) %>% print()
+        
+        p_out <- ggplot()+
+          theme_pubr(base_family = "Times")+
+          theme(aspect.ratio = 1)+
+          geom_boxplot(data = df_j_res_last_range_fix,
+                       aes(x=y,
+                           y=x), width=0.5)+
+          geom_dotplot(data = df_j_res_last_range_fix,
+                       aes(x=y,
+                           y=x,),
+                       binaxis = "y", stackdir = "center",dotsize=0.3)+
+          xlab(ev)+ylab(xlab)+
+          ggtitle(xtag)
+        
+        grid::grid.draw(p_out)
+      }
+      # 
+      model_formula <- c("x") %>%
+        # str_c(collapse =  " + ") %>%
+        c(ev,  "~",.) %>%
+        str_c(collapse =" ")
+      print(model_formula)
+    
+      if(ev %in% c(
+        # "disc_u_outcome",
+                   "death_in_30days", "death_in_7days")){
+        model <- glm(model_formula, data = df_j_res_last_range, family = binomial("logit"))
+        
+        l_models[[ev]][[f_in_l]] <- model
+        l_data[[ev]][[f_in_l]] <- df_j_res_last_range %>% 
+          mutate(xtag = xtag)
+        
+        
+        # pred_temp <- model %>% 
+        #   predict(type = "response")  %>% 
+        #   ROCR::prediction(labels = df_j_res_last_range$y == 1)
+        roc <- model %>% 
+          predict(type = "response")  %>% 
+          ROCR::prediction(labels = df_j_res_last_range$y == 1) %>%
+          performance("tpr", "fpr")
+        
+        auc_val <- model %>% 
+          predict(type = "response")  %>% 
+          ROCR::prediction(labels = df_j_res_last_range$y == 1) %>%
+          performance("auc") %>% 
+          .@y.values %>% 
+          .[[1]]
+
+        # 
+        l_auc[[ev]][[f_in_l]] <- auc_val
+        
+        df_roc <- data.frame(tpr = roc@y.values[[1]], fpr = roc@x.values[[1]])
+        
+        l_roc[[ev]][[f_in_l]] <- df_roc %>% 
+          mutate(f = f_in_l)
+        
+        
+        p_roc <- ggplot(df_roc, aes(x = fpr, y = tpr)) + 
+          theme_pubr(base_family = "Times")+
+          theme(aspect.ratio = 1)+
+          geom_line(color = "red") +
+          geom_abline(intercept = 0, slope = 1, linetype = "dashed") +
+          coord_fixed() +
+          labs(x = "(1 - Spec)", y = "Sens")+
+          ggtitle(xtag)
+        
+        p_roc %>% grid::grid.draw()
+        
+        l_proc[[ev]][[f_in_l]] <- p_roc
+        
+      }else{
+        
+      cor( df_j_res_last_range$x,  df_j_res_last_range$y, method = "spearman") %>% 
+          print()
+        model <- glm(model_formula, data = df_j_res_last_range)
+    
+      }
+    
+      model %>%
+        summary() %>%
+        print()
+      
+      df_coef <- model %>% 
+        summary() %>% 
+        coef() %>% 
+        as.data.frame() %>% 
+        mutate(variables = rownames(.)) %>% 
+        mutate(y=ev) %>% 
+        mutate(f = f_in_l) %>% 
+        mutate(xtag = xtag)
+      l_coef[[ev]][[xtag]] <- df_coef
+      }
+    }
+  
+  
+  toc()
+  
+  # break
+  
+}
+
+```
+
+
+```{r}
+l_auc
+```
+
+
+```{r}
+f_out <- "./eval_sources_model_fix20260930.rds"
+
+list() %>%
+  append_list(l_coef) %>%
+  append_list(l_roc) %>%
+  append_list(l_models) %>%
+  append_list(l_data) %>%
+  saveRDS(f_out)
+```
+#readRDSで見てみる（2025/07/11 )
+
+```{r}
+l_auc <- readRDS(f_out)
+```
+
+
+
+```{r}
+sessionInfo()
+```
+

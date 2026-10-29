@@ -1,0 +1,426 @@
+---
+title: "Final numbers for the manuscript (main text v2.3, ESM v2.4)"
+subtitle: "RR_inKUHP — computed from the evaluation outputs of the 2026-09-29/30 refit"
+author: "Kenichi Saito"
+date: "2026-10-29"
+output:
+  html_document:
+    toc: true
+    code_folding: show
+editor_options:
+  chunk_output_type: console
+---
+
+```{r setup, include = FALSE}
+knitr::opts_chunk$set(message = FALSE, warning = FALSE)
+```
+
+## Purpose
+
+This document produces every number and figure in the manuscript and ESM that
+depends on the estimated severity. It reads the outputs of the two evaluation
+Rmds, so no Stan model is refitted:
+
+* `p7_vit_dist_state_models_v2_compe_eval_fix20260930.Rmd` →
+  `eval_sources_model_fix20260930.rds` (full model and leave-one-channel-out)
+* `p7_vit_dist_state_models_v2_compe_on_eval_fix20261001.Rmd` →
+  `eval_sources_model_on_add_fix.rds` (single-channel models)
+
+The exposure is `estim_mean_dmg` exactly as computed there (24-h time-weighted
+mean severity, lines 353–368 / 363–378). The outcome is `death_in_30days`.
+
+Run order and inputs: see `README.md` of the repository. Working directory:
+`p7_vit_dist_state_models_comp/`. Runtime: a few minutes; the optional
+convergence section reads the nine saved fits (about 17 GB) and takes longer.
+
+Only aggregate results are printed or saved. The outputs go to `figs_final_v23/`
+(figures as PDF, numbers as CSV and TXT).
+
+## Settings
+
+```{r config}
+cfg <- list(
+  eval_ex = "./eval_sources_model_fix20260930.rds",
+  eval_on = "./eval_sources_model_on_add_fix.rds",
+  ts_ex   = "20260929_100700.473068",
+  ts_on   = "20260930_004943.381441",
+  f_icu   = "../p2_unplanned_ICUadmission/dat/icu_target20240517_044716.297905.rds",
+  f_p5    = "../p5_vit_dist_inhosp/dat/df_j20240524_052253.rds",
+  out     = "./figs_final_v23",
+  check_against_html = TRUE,   # AUCs must equal those printed in the 10/1 HTMLs
+  run_convergence    = TRUE,   # reads the nine fits (slow)
+  seed_bootstrap     = 42,
+  B_bootstrap        = 2000
+)
+## A test harness may pre-define `cfg_override` (list) to change any setting.
+if (exists("cfg_override")) cfg <- utils::modifyList(cfg, cfg_override)
+
+key_ex <- function(x) sprintf(".//ssm_801_4_redvar_rs_ex%s_%s_exres_list.rds", x, cfg$ts_ex)
+key_on <- function(x) sprintf(".//ssm_801_4_redvar_rs_on%s_%s_exres_list.rds", x, cfg$ts_on)
+if (is.null(cfg$fit_files)) cfg$fit_files <- c(
+  full    = key_ex("ZERO"),  exTEMPR = key_ex("TEMPR"), exRESP = key_ex("RESP"),
+  exBPM   = key_ex("BPM"),   exPULSE = key_ex("PULSE"),
+  onPULSE = key_on("PULSE"), onBPM   = key_on("BPM"),   onRESP = key_on("RESP"),
+  onTEMPR = key_on("TEMPR"))
+
+## AUC (glm fitted probability -> ROCR) printed in the knitted HTMLs of 2026-10-01
+auc_html <- c(full = 0.6303763, exBPM = 0.624552, exPULSE = 0.6014785,
+              exRESP = 0.6173835, exTEMPR = 0.6442652,
+              onBPM = 0.5871416, onPULSE = 0.6202957, onRESP = 0.5518466,
+              onTEMPR = 0.5234869)
+dir.create(cfg$out, showWarnings = FALSE)
+```
+
+```{r packages}
+need <- c("dplyr", "tidyr", "tibble", "ggplot2", "pROC", "ROCR", "sandwich")
+if (cfg$run_convergence) need <- c(need, "rstan")
+miss <- need[!vapply(need, requireNamespace, logical(1), quietly = TRUE)]
+if (length(miss)) stop("Install first: install.packages(c(",
+                       paste0('"', miss, '"', collapse = ", "), "))")
+suppressPackageStartupMessages({
+  library(dplyr); library(tidyr); library(tibble); library(ggplot2)
+})
+```
+
+## 0. Inputs
+
+```{r inputs}
+inputs <- c(cfg$eval_ex, cfg$eval_on, cfg$f_icu, cfg$f_p5)
+stopifnot(all(file.exists(inputs)))
+data.frame(file = inputs, md5 = unname(tools::md5sum(inputs)))
+```
+
+```{r load}
+icu <- readRDS(cfg$f_icu) %>% distinct(JIPAD_ID, PT_ID, ADM_DT)
+ev_ex <- readRDS(cfg$eval_ex)$l_data[["death_in_30days"]]
+ev_on <- readRDS(cfg$eval_on)$l_data[["death_in_30days"]]
+keys <- c(full = key_ex("ZERO"), exTEMPR = key_ex("TEMPR"), exRESP = key_ex("RESP"),
+          exBPM = key_ex("BPM"), exPULSE = key_ex("PULSE"),
+          onPULSE = key_on("PULSE"), onBPM = key_on("BPM"),
+          onRESP = key_on("RESP"), onTEMPR = key_on("TEMPR"))
+src <- c(rep("ex", 5), rep("on", 4)); names(src) <- names(keys)
+D <- lapply(names(keys), function(nm) {
+  L <- if (src[[nm]] == "ex") ev_ex else ev_on
+  d <- L[[keys[[nm]]]]
+  if (is.null(d)) stop("not found in the evaluation output: ", keys[[nm]])
+  d %>% transmute(JIPAD_ID, y = as.numeric(death_in_30days), x = estim_mean_dmg) %>%
+    filter(!is.na(x), !is.na(y)) %>%
+    left_join(icu, by = "JIPAD_ID")
+})
+names(D) <- names(keys)
+stopifnot(!anyNA(D$full$PT_ID))
+sapply(D, nrow)
+```
+
+## 1. AUC check against the knitted HTMLs
+
+AUC by the manuscript convention: fitted probabilities of the univariable
+logistic regression, evaluated with ROCR (identical to the evaluation Rmds).
+
+```{r auc-check}
+auc_glm <- function(d) {
+  m <- glm(y ~ x, family = binomial("logit"), data = d)
+  p <- predict(m, type = "response")
+  ROCR::performance(ROCR::prediction(p, labels = d$y == 1), "auc")@y.values[[1]]
+}
+chk <- tibble(model = names(D), n = sapply(D, nrow),
+              auc = sapply(D, auc_glm),
+              auc_html = unname(auc_html[names(D)]),
+              diff = auc - auc_html)
+chk %>% mutate(across(c(auc, auc_html), ~ round(., 7)), diff = signif(diff, 2))
+if (cfg$check_against_html) stopifnot(all(abs(chk$diff) < 1e-6))
+```
+
+## 2. Primary result (full model, 160 admissions)
+
+Cluster-robust (patient-level) standard errors for the odds ratios; DeLong
+95 % CI for the AUC.
+
+```{r primary}
+rep_one <- function(df) {
+  df$z <- as.numeric(scale(df$x))
+  m1 <- glm(y ~ z, binomial, data = df)              # per 1 SD
+  m2 <- glm(y ~ x, binomial, data = df)              # per unit
+  b  <- coef(m1)[["z"]]
+  se <- sqrt(diag(sandwich::vcovCL(m1, cluster = ~PT_ID)))[["z"]]
+  bu <- coef(m2)[["x"]]
+  su <- sqrt(diag(sandwich::vcovCL(m2, cluster = ~PT_ID)))[["x"]]
+  r  <- pROC::roc(df$y, df$x, quiet = TRUE, direction = "<")
+  ci <- as.numeric(pROC::ci.auc(r))
+  tibble(n = nrow(df), deaths = sum(df$y), patients = n_distinct(df$PT_ID),
+         auc = as.numeric(pROC::auc(r)), auc_lo = ci[1], auc_hi = ci[3],
+         or_sd = exp(b), or_sd_lo = exp(b - 1.96 * se), or_sd_hi = exp(b + 1.96 * se),
+         p = 2 * pnorm(-abs(b / se)),
+         or_unit = exp(bu), or_unit_lo = exp(bu - 1.96 * su), or_unit_hi = exp(bu + 1.96 * su))
+}
+prim <- rep_one(D$full)
+prim
+```
+
+## 3. Repeated admissions: cluster bootstrap and first admission only
+
+```{r bootstrap}
+d <- D$full
+set.seed(cfg$seed_bootstrap)
+pts <- unique(d$PT_ID); aucs <- numeric(0); ors <- numeric(0)
+for (b in seq_len(cfg$B_bootstrap)) {
+  sp <- sample(pts, length(pts), replace = TRUE)
+  bd <- bind_rows(lapply(seq_along(sp), function(k) d[d$PT_ID == sp[k], ]))
+  if (length(unique(bd$y)) < 2) next
+  bd$z <- as.numeric(scale(bd$x))
+  aucs <- c(aucs, as.numeric(pROC::auc(pROC::roc(bd$y, bd$x, quiet = TRUE, direction = "<"))))
+  ors  <- c(ors, tryCatch(exp(coef(glm(y ~ z, binomial, data = bd))[["z"]]),
+                          error = function(e) NA))
+}
+ors <- ors[is.finite(ors)]
+boot <- tibble(B = length(aucs),
+               auc = median(aucs), auc_lo = quantile(aucs, .025), auc_hi = quantile(aucs, .975),
+               or_sd = median(ors), or_sd_lo = quantile(ors, .025), or_sd_hi = quantile(ors, .975))
+
+fa <- d %>% group_by(PT_ID) %>% slice_min(ADM_DT, n = 1, with_ties = FALSE) %>% ungroup()
+fa$z <- as.numeric(scale(fa$x))
+mf <- glm(y ~ z, binomial, data = fa)
+bf <- coef(mf)[["z"]]; sf <- summary(mf)$coef["z", "Std. Error"]
+rf <- pROC::roc(fa$y, fa$x, quiet = TRUE, direction = "<"); cf <- as.numeric(pROC::ci.auc(rf))
+first <- tibble(n = nrow(fa), deaths = sum(fa$y),
+                or_sd = exp(bf), or_sd_lo = exp(bf - 1.96 * sf), or_sd_hi = exp(bf + 1.96 * sf),
+                auc = as.numeric(pROC::auc(rf)), auc_lo = cf[1], auc_hi = cf[3])
+boot; first
+```
+
+## 4. Comparison with aPS-4 (ESM Table 4)
+
+aPS-4 = APACHE II Acute Physiology Score points for temperature, mean blood
+pressure, heart rate and respiratory rate, using the last measurement within 3 h
+and 12 h before ICU admission; unmeasured items score 0. Ward vitals are joined
+to admissions by `PT_ID` and `ADM_DT`.
+
+```{r aps4}
+vm <- c(TEMPR = "tempr", BPM = "map", PULSE = "hr", RESP = "rr")
+a_t <- function(t) case_when(is.na(t)~0L, t>=41~4L, t>=39~3L, t>=38.5~1L, t>=36~0L, t>=34~1L, t>=32~2L, t>=30~3L, TRUE~4L)
+a_m <- function(m) case_when(is.na(m)~0L, m>=160~4L, m>=130~3L, m>=110~2L, m>=70~0L, m>=50~2L, TRUE~4L)
+a_h <- function(h) case_when(is.na(h)~0L, h>=180~4L, h>=140~3L, h>=110~2L, h>=70~0L, h>=55~2L, h>=40~3L, TRUE~4L)
+a_r <- function(r) case_when(is.na(r)~0L, r>=50~4L, r>=35~3L, r>=25~1L, r>=12~0L, r>=10~1L, r>=6~2L, TRUE~4L)
+p5 <- readRDS(cfg$f_p5) %>% ungroup()
+dj <- p5 %>% select(-any_of("JIPAD_ID")) %>%
+  left_join(icu %>% select(PT_ID, ADM_DT, JIPAD_ID), by = c("PT_ID", "ADM_DT"))
+ext <- function(h) dj %>%
+  filter(!is.na(JIPAD_ID), nhrs >= -h, nhrs <= 0, name %in% names(vm)) %>%
+  group_by(JIPAD_ID, name) %>% arrange(nhrs) %>% slice_tail(n = 1) %>% ungroup() %>%
+  mutate(v = vm[name]) %>% select(JIPAD_ID, v, value) %>%
+  pivot_wider(names_from = v, values_from = value, names_prefix = "last_")
+need_cols <- function(s) { for (cc in c("last_tempr", "last_map", "last_hr", "last_rr"))
+  if (!cc %in% names(s)) s[[cc]] <- NA_real_; s }
+score <- function(s) s %>% mutate(APS = a_t(last_tempr) + a_m(last_map) + a_h(last_hr) + a_r(last_rr))
+ids <- tibble(JIPAD_ID = unique(icu$JIPAD_ID))
+s3  <- ids %>% left_join(ext(3),  by = "JIPAD_ID") %>% need_cols() %>% score()
+s12 <- ids %>% left_join(ext(12), by = "JIPAD_ID") %>% need_cols() %>% score()
+da <- D$full %>%
+  left_join(s3  %>% select(JIPAD_ID, APS_3h  = APS), by = "JIPAD_ID") %>%
+  left_join(s12 %>% select(JIPAD_ID, APS_12h = APS), by = "JIPAD_ID")
+r_ssm <- pROC::roc(da$y, da$x,       quiet = TRUE, direction = "<")
+r_3   <- pROC::roc(da$y, da$APS_3h,  quiet = TRUE, direction = "<")
+r_12  <- pROC::roc(da$y, da$APS_12h, quiet = TRUE, direction = "<")
+row_of <- function(lab, r, ref = NULL) {
+  ci <- as.numeric(pROC::ci.auc(r))
+  out <- tibble(predictor = lab, auc = as.numeric(pROC::auc(r)), auc_lo = ci[1], auc_hi = ci[3],
+                d_auc = NA_real_, p_delong = NA_real_)
+  if (!is.null(ref)) {
+    tt <- pROC::roc.test(ref, r, method = "delong", paired = TRUE)
+    out$d_auc <- as.numeric(pROC::auc(ref)) - out$auc; out$p_delong <- tt$p.value
+  }
+  out
+}
+aps <- bind_rows(row_of("Estimated severity (SSM)", r_ssm),
+                 row_of("aPS-4, 3-h window",  r_3,  r_ssm),
+                 row_of("aPS-4, 12-h window", r_12, r_ssm))
+aps
+```
+
+## 5. Leave-one-channel-out (ESM Table 5, Fig. 4)
+
+ΔAUC = AUC(full) − AUC(channel removed), from unrounded AUCs; positive means
+discrimination fell when the channel was removed.
+
+```{r loo}
+auc_full <- chk$auc[chk$model == "full"]
+loo <- chk %>% filter(model %in% c("full", "exTEMPR", "exRESP", "exBPM", "exPULSE")) %>%
+  mutate(d_auc = if_else(model == "full", NA_real_, auc_full - auc)) %>%
+  select(model, n, auc, d_auc)
+loo
+```
+
+## 6. Single-channel models (ESM Fig. 3)
+
+```{r single}
+beta_of <- function(d) coef(glm(y ~ x, family = binomial("logit"), data = d))[["x"]]
+single <- chk %>% filter(model %in% c("onPULSE", "onBPM", "onRESP", "onTEMPR")) %>%
+  mutate(beta = sapply(D[model], beta_of)) %>% select(model, n, beta, auc)
+single
+```
+
+## 7. Figures
+
+PDF via the base `pdf` device (font family "Times"); PNG versions are made from
+the PDFs for the documents.
+
+```{r figures}
+FAM <- "Times"
+save_pdf <- function(p, name, w, h, units = "cm")
+  ggsave(file.path(cfg$out, paste0(name, ".pdf")), p, width = w, height = h,
+         units = units, device = "pdf")
+
+## Fig 3a: severity by 30-day outcome
+d3 <- D$full %>% mutate(Outcome = factor(ifelse(y == 1, "Died within 30 days", "Survived"),
+                                         levels = c("Survived", "Died within 30 days")))
+set.seed(1)
+g3a <- ggplot(d3, aes(Outcome, x, fill = Outcome)) +
+  geom_boxplot(width = 0.55, outlier.shape = NA, alpha = 0.55, linewidth = 0.8) +
+  geom_jitter(width = 0.14, size = 2.2, alpha = 0.65) +
+  scale_fill_manual(values = c("Survived" = "#56B4E9", "Died within 30 days" = "#D55E00")) +
+  theme_classic(base_size = 15, base_family = FAM) +
+  theme(legend.position = "none",
+        axis.text = element_text(colour = "black", size = 15),
+        axis.line = element_line(linewidth = 0.8)) +
+  labs(x = NULL, y = "Mean estimated severity (24 h before ICU admission)")
+save_pdf(g3a, "Fig3a_severity_by_outcome_v23", 13.3, 13.2)
+
+## Fig 3b: ROC, estimated severity vs aPS-4 (step functions)
+a3b <- c(ssm = as.numeric(pROC::auc(r_ssm)), a3 = as.numeric(pROC::auc(r_3)),
+         a12 = as.numeric(pROC::auc(r_12)))
+labs3 <- c(sprintf("Estimated severity (SSM) (AUC = %.3f)", a3b["ssm"]),
+           sprintf("aPS-4 (12-h window) (AUC = %.3f)", a3b["a12"]),
+           sprintf("aPS-4 (3-h window) (AUC = %.3f)",  a3b["a3"]))
+step_df <- function(r, lab) tibble(fpr = 1 - r$specificities, tpr = r$sensitivities,
+                                   curve = lab) %>% arrange(fpr, tpr)
+dd <- bind_rows(step_df(r_ssm, labs3[1]), step_df(r_12, labs3[2]), step_df(r_3, labs3[3])) %>%
+  mutate(curve = factor(curve, levels = labs3))
+g3b <- ggplot(dd, aes(fpr, tpr, colour = curve)) +
+  geom_abline(intercept = 0, slope = 1, linetype = "dashed", colour = "grey50", linewidth = 0.7) +
+  geom_step(linewidth = 1.4) +
+  scale_colour_manual(values = setNames(c("#E41A1C", "#A65628", "#FF7F00"), labs3)) +
+  coord_equal(xlim = c(0, 1), ylim = c(0, 1), expand = FALSE, clip = "off") +
+  labs(x = "1 - Specificity", y = "Sensitivity", colour = NULL) +
+  theme_classic(base_size = 22, base_family = FAM) +
+  theme(legend.position = c(0.62, 0.16), legend.text = element_text(size = 15, family = FAM),
+        legend.key.width = unit(1.6, "lines"), legend.background = element_blank(),
+        axis.text = element_text(size = 19, colour = "black"), plot.margin = margin(8, 14, 6, 6))
+save_pdf(g3b, "Fig3b_ROC_SSM_vs_aPS4_v23", 7.4, 7.2, units = "in")
+
+## Fig ESM-2: leave-one-channel-out
+lv <- c("Full model", "Excluding temperature", "Excluding blood pressure",
+        "Excluding respiratory rate", "Excluding heart rate")
+lo <- tibble(ch = lv, auc = chk$auc[match(c("full", "exTEMPR", "exBPM", "exRESP", "exPULSE"), chk$model)]) %>%
+  mutate(ch = factor(ch, levels = rev(lv)), is_full = ch == "Full model")
+ge2 <- ggplot(lo, aes(ch, auc, fill = is_full)) +
+  geom_col(width = 0.62) + coord_flip(ylim = c(0.55, 0.66)) +
+  geom_hline(yintercept = auc_full, linetype = "dashed", colour = "grey40") +
+  geom_text(aes(label = sprintf("%.3f", auc)), hjust = -0.18, family = FAM, size = 3.1) +
+  scale_fill_manual(values = c("TRUE" = "#DA0017", "FALSE" = "#959595"), guide = "none") +
+  theme_classic(base_family = FAM) +
+  theme(axis.text = element_text(colour = "black", size = 11), axis.title = element_text(size = 11)) +
+  labs(x = NULL, y = "AUC for 30-day mortality")
+save_pdf(ge2, "FigESM2_leave_one_out_AUC_v23", 13, 9)
+
+## Fig ESM-3: single-channel models
+lab <- c(onTEMPR = "Temperature", onRESP = "Respiratory rate", onBPM = "Blood pressure",
+         onPULSE = "Heart rate")
+P <- bind_rows(single %>% transmute(ch = lab[model], n, auc, is_full = FALSE),
+               tibble(ch = "Full model", n = nrow(D$full), auc = auc_full, is_full = TRUE)) %>%
+  mutate(ch = factor(ch, levels = c("Temperature", "Respiratory rate", "Blood pressure",
+                                    "Heart rate", "Full model"))) %>%
+  arrange(ch) %>% mutate(lab_ch = sprintf("%s (n = %d)", ch, n))
+P$lab_ch <- factor(P$lab_ch, levels = P$lab_ch)
+ge3 <- ggplot(P, aes(lab_ch, auc, fill = is_full)) +
+  geom_col(width = 0.62) +
+  geom_hline(yintercept = auc_full, linetype = "dashed", colour = "grey40", linewidth = 0.8) +
+  geom_text(aes(y = auc + 0.010, label = sprintf("%.3f", auc)), hjust = 0, size = 5.6, family = FAM) +
+  scale_fill_manual(values = c("TRUE" = "#DA0017", "FALSE" = "#959595"), guide = "none") +
+  scale_y_continuous(breaks = seq(0.50, 0.65, 0.05), expand = expansion(mult = c(0, 0.12))) +
+  coord_flip(ylim = c(0.49, 0.685)) +
+  labs(x = NULL, y = "AUC for 30-day mortality") +
+  theme_classic(base_size = 21, base_family = FAM) +
+  theme(axis.text = element_text(colour = "black", size = 18),
+        axis.title.x = element_text(size = 19, margin = margin(t = 9)),
+        axis.ticks.y = element_blank(), plot.margin = margin(10, 22, 8, 8))
+save_pdf(ge3, "FigESM3_single_channel_AUC_v23", 8.6, 5.2, units = "in")
+list.files(cfg$out)
+```
+
+## 8. Convergence of the nine fits (ESM 1.2)
+
+```{r convergence, eval = cfg$run_convergence}
+conv <- lapply(names(cfg$fit_files), function(nm) {
+  L  <- readRDS(cfg$fit_files[[nm]]); ft <- L[[1]]
+  s  <- rstan::summary(ft)$summary
+  structural <- grepl("^(as\\[|coef_dt_div$|sigma_ijs_ijss$|pts_base_is\\[)", rownames(s))
+  severity   <- grepl("^dmg_ijs\\[", rownames(s))
+  sp  <- rstan::get_sampler_params(ft, inc_warmup = FALSE)
+  out <- tibble(model = nm, states = nrow(L[[2]]), rows = nrow(L[[3]]),
+    rhat_max_struct = max(s[structural, "Rhat"], na.rm = TRUE),
+    neff_min_struct = min(s[structural, "n_eff"], na.rm = TRUE),
+    rhat_max_sev    = max(s[severity, "Rhat"], na.rm = TRUE),
+    neff_min_sev    = min(s[severity, "n_eff"], na.rm = TRUE),
+    rhat_max_all    = max(s[, "Rhat"], na.rm = TRUE),
+    neff_min_all    = min(s[, "n_eff"], na.rm = TRUE),
+    divergent       = sum(vapply(sp, function(x) sum(x[, "divergent__"]), numeric(1))),
+    treedepth_hits  = sum(vapply(sp, function(x) sum(x[, "treedepth__"] >= 15), numeric(1))))
+  rm(L, ft, s, sp); invisible(gc())
+  out
+}) %>% bind_rows()
+conv
+write.csv(conv, file.path(cfg$out, "convergence_v23.csv"), row.names = FALSE)
+```
+
+## 9. Software versions (Methods, Analytic environment)
+
+```{r versions}
+ver <- function(p) if (requireNamespace(p, quietly = TRUE)) as.character(packageVersion(p)) else NA
+sw <- c(R = R.version.string, rstan = ver("rstan"), StanHeaders = ver("StanHeaders"),
+        Stan = if (requireNamespace("rstan", quietly = TRUE)) rstan::stan_version() else NA,
+        ROCR = ver("ROCR"), pROC = ver("pROC"), sandwich = ver("sandwich"),
+        dplyr = ver("dplyr"), ggplot2 = ver("ggplot2"), lme4 = ver("lme4"))
+sw
+```
+
+## 10. Manuscript-ready numbers
+
+```{r summary}
+f3 <- function(x) sprintf("%.3f", x); f2 <- function(x) sprintf("%.2f", x)
+sgn <- function(x) sprintf("%+.3f", x)
+L <- c(
+  sprintf("Cohort: %d admissions, %d patients, %d deaths within 30 days",
+          prim$n, prim$patients, prim$deaths),
+  sprintf("Primary: AUC %s (95%% CI %s-%s); OR per 1-SD %s (95%% CI %s-%s), p = %s; OR per unit %s (95%% CI %s-%s)",
+          f3(prim$auc), f3(prim$auc_lo), f3(prim$auc_hi), f2(prim$or_sd), f2(prim$or_sd_lo),
+          f2(prim$or_sd_hi), f3(prim$p), f2(prim$or_unit), f2(prim$or_unit_lo), f2(prim$or_unit_hi)),
+  sprintf("Cluster bootstrap (B = %d): AUC %s (%s-%s); OR per 1-SD %s (%s-%s)",
+          boot$B, f3(boot$auc), f3(boot$auc_lo), f3(boot$auc_hi),
+          f2(boot$or_sd), f2(boot$or_sd_lo), f2(boot$or_sd_hi)),
+  sprintf("First admission only (n = %d, deaths = %d): OR per 1-SD %s (%s-%s); AUC %s (%s-%s)",
+          first$n, first$deaths, f2(first$or_sd), f2(first$or_sd_lo), f2(first$or_sd_hi),
+          f3(first$auc), f3(first$auc_lo), f3(first$auc_hi)),
+  sprintf("aPS-4: %s", paste(sprintf("%s AUC %s (%s-%s)%s", aps$predictor, f3(aps$auc),
+          f3(aps$auc_lo), f3(aps$auc_hi),
+          ifelse(is.na(aps$p_delong), "", sprintf(", dAUC %s, DeLong p = %s",
+                 sgn(aps$d_auc), f3(aps$p_delong)))), collapse = "; ")),
+  sprintf("Leave-one-out: %s", paste(sprintf("%s %s%s", loo$model, f3(loo$auc),
+          ifelse(is.na(loo$d_auc), "", sprintf(" (dAUC %s)", sgn(loo$d_auc)))), collapse = "; ")),
+  sprintf("Single channel: %s", paste(sprintf("%s %s (n = %d, beta %s)", single$model,
+          f3(single$auc), single$n, sprintf("%+.3f", single$beta)), collapse = "; ")),
+  sprintf("Software: %s", paste(names(sw), sw, sep = " ", collapse = "; ")))
+writeLines(L, file.path(cfg$out, "final_numbers_v23.txt"))
+cat(L, sep = "\n")
+num <- bind_rows(
+  prim %>% mutate(block = "primary"), boot %>% mutate(block = "bootstrap"),
+  first %>% mutate(block = "first_admission"),
+  aps %>% rename(model = predictor) %>% mutate(block = "aps4"),
+  loo %>% mutate(block = "leave_one_out"), single %>% mutate(block = "single_channel"))
+write.csv(num, file.path(cfg$out, "final_numbers_v23.csv"), row.names = FALSE)
+```
+
+## Session info
+
+```{r session}
+sessionInfo()
+```

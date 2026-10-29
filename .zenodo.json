@@ -1,0 +1,12 @@
+{
+  "title": "Analysis code for: Estimating the Effect of Respiratory Rate on Patient Condition Using a State-Space Model in a University Hospital Setting",
+  "upload_type": "software",
+  "description": "R/Stan code for a Bayesian state-space model that estimates latent severity from irregularly recorded general-ward vital signs before unplanned ICU admission, relates the 24-h mean severity to 30-day mortality, and assesses each vital sign by leave-one-channel-out and single-channel refits. No patient data are included.",
+  "creators": [
+    {"name": "Fukuyama, Keita", "affiliation": "Kyoto University"},
+    {"name": "Saito, Kenichi", "affiliation": "Kyoto University"}
+  ],
+  "license": "MIT",
+  "access_right": "open",
+  "keywords": ["state-space model", "vital signs", "respiratory rate", "patient deterioration", "Stan"]
+}

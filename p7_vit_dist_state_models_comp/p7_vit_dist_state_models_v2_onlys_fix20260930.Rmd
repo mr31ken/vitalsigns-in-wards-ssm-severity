@@ -1,0 +1,390 @@
+---
+title: "p7_vit_dist_state_models"
+author: "fk506cni"
+date: "2024-09-22"
+output: html_document
+editor_options: 
+  chunk_output_type: console
+---
+
+## phase1:
+vital sign -> hidden status
+
+nohup Rscript -e "rmarkdown::render('p7_vit_dist_state_models_v2_onlys_fix20260930.Rmd')" > knit_$(date +%Y%m%d_%H%M).log 2>&1 &
+
+
+```{r}
+require(tidyverse)
+require(openxlsx)
+require(jsonlite)
+require(officer)
+require(ggpubr)
+require(IRdisplay)
+require(data.table)
+require(lubridate)
+require(repr)
+require(tictoc)
+# require(kernlab)
+# require(curl)
+
+```
+
+```{r}
+ts <- Sys.time()  %>% 
+    as.character() %>% 
+    str_remove_all(., "[-:]*") %>% 
+    str_replace(.," ", "_")
+ts
+```
+
+```{r}
+outputdir <- "./figs/"
+if(!dir.exists(outputdir)){
+  dir.create(outputdir)
+}
+
+ggsave2_tri <- function(plot, wid = 9, hei=9){
+  plot_name <- deparse(substitute(plot))
+  
+  #png
+  file_name <- paste(outputdir,plot_name, ".png", sep = "",collapse = "")
+  ggsave(filename = file_name,plot = plot,device = "png",width = wid, height = hei,dpi = 300,units = "cm")
+  
+  
+  #pdf
+  file_name <- paste(outputdir,plot_name, ".pdf", sep = "",collapse = "")
+  # ggsave(filename = file_name,plot = plot,device = "pdf",width = wid, height = hei,dpi = 300,units = "cm")
+  
+  #pptx
+  file_name <- paste(outputdir,plot_name, ".pptx", sep = "",collapse = "")
+  plot_ed <- rvg::dml(ggobj = plot,width = wid, height = hei)
+  
+  doc <- read_pptx() %>%
+    add_slide('Title and Content', 'Office Theme') %>%
+    ph_with(value = "", location = ph_location_type(type = "title")) %>%
+    ph_with(value = plot_ed, location = ph_location(type = "body",width = cm2inch(wid), height = cm2inch(hei),left = 2, top = 2))
+  doc %>%
+    print(target = file_name)
+  
+}
+
+
+
+inch2cm <- function(x){
+  return(x/0.39370)
+}
+cm2inch <- function(x){
+  return(0.39370*x)
+}
+
+p2cm <- function(x){
+  return(as.integer(0.008466666666666667 * x))
+}
+
+cm2p <- function(x){
+  return(as.integer(118.11023622047244 *x))
+}
+
+append_list <- function(l, x){
+  xname  <- deparse(substitute(x))
+  l[[xname]] <- x
+  return(l)
+}
+
+# load function
+get_vals <- function(l){
+  lnames <- names(l)
+  for(n in lnames){
+    assign(n, l[[n]], pos = .GlobalEnv)
+  }
+  return(lnames)
+}
+```
+
+```{r}
+f_in <- "../p1_whole_admtc_vit_fromCIS/dat/ir_admtc_20240329_075221.rds"
+df_admtc <- readRDS(f_in)
+
+# f2_in <- "../p1_whole_admtc_vit_fromCIS/dat/ir_vit_20240329_075221.rds"
+f2_in <- "../p1_whole_admtc_vit_fromCIS/dat/vit_20240329_075221.rds"
+df_vit <- readRDS(f2_in)  %>% 
+  mutate(BPM = case_when(
+    BPH * BPL > 0 ~ BPL + (BPH - BPL) / 3,
+    BPH * BPL == 0 ~ 0,
+    T ~ 0
+  ))
+
+f3_in <- "../p2_unplanned_ICUadmission/dat/icu_target20240517_044716.297905.rds"
+df_icu_target <- readRDS(f3_in)
+
+f_setting <- "../p1_whole_admtc_vit_fromCIS/dat/setting_20240329_082442.rds"
+setting_list <- readRDS(f_setting)
+```
+
+```{r}
+df_vit <- df_vit %>%
+    mutate(dt = str_c(MEASURED_DATE, MEASURED_TIME, sep=" ") %>%
+        lubridate::ymd_hms())
+```
+
+
+```{r}
+# 正常範囲の定義
+cutoff_values <- list(
+  RESP = c(12, 24),
+  TEMPR = c(36, 38.4),
+  PULSE = c(70, 109),
+  BPM = c(70, 109))
+
+df_cutoff_values <- cutoff_values %>% 
+  as.data.frame() %>% 
+  t() %>% 
+  as.data.frame() %>% 
+  mutate(name = rownames(.)) %>% 
+  `colnames<-`(c("lower_limit", "upper_limit", "name")) %>% 
+  mutate(median_of_range = (lower_limit+upper_limit)/2) %>% 
+  mutate(range_of_safe = upper_limit - median_of_range)
+
+df_cutoff_values
+```
+
+```{r}
+library(ggfortify)
+library(gghighlight)
+
+library(rstan)
+library(bayesplot)
+
+# 計算の高速化
+rstan_options(auto_write = TRUE)
+options(mc.cores = parallel::detectCores())
+
+ex_pars <- c(
+  "dmg_ijs_div",
+  "trend_ijs_div",
+  "as0", "mes_mu_ijks", "mu_phi_ijs", "sigma_dt", "all_outs"
+)
+
+ex_conds <- c("RESP", "BPM", "TEMPR", "PULSE")
+
+ij_coef <- 1e+6
+max_i <- 500
+
+
+f_stn <- "ssm_801_4_redvar_rs.stan"
+c_and_c <- 4
+
+prs <- c("dmg_ijs[1]", "dmg_ijs[2]", "dmg_ijs[3]"
+         # ,"dmg_ijs[4]",
+         ,"phi_ijs[1]", "phi_ijs[2]", "phi_ijs[3]"
+         # , "phi_ijs[4]"
+         ,"as[1]"
+         ,"coef_dt_div"
+         # , "as[2]"
+         )
+
+```
+
+
+```{r}
+l_eval <- list()
+
+for(i in 1:length(ex_conds)){
+  tic()
+  excon <- ex_conds[[i]]
+  
+  print(excon)
+  f_out_l <- f_stn %>% 
+    str_replace("\\.stan", 
+                str_c("_on" ,excon, "_", ts,"_exres_list.rds", collapse = "", sep = ""))
+  f_out_l %>% print()
+  
+  f_out_smr <- str_c("./figs/stan_smr_on" ,excon, "_", ts, "_exsmr.xlsx", collapse = "", sep = "")
+  
+  df_j <- left_join(df_vit,
+                    df_icu_target %>% 
+                      dplyr::select(PT_ID, JIPAD_ID, ADM_DT),
+                    by = c("PT_ID"="PT_ID"), 
+                    relationship = "many-to-many") %>% 
+  dplyr::select(PT_ID, ADM_DT, everything()) %>% 
+  mutate(sub_DT=ADM_DT-dt) %>% 
+  filter(sub_DT>=0) %>% 
+  dplyr::select(PT_ID, ADM_DT, dt, sub_DT, everything()) %>%
+  tidyr::pivot_longer(cols=c("PULSE", "RESP", "BPL", "BPH", "BPM", "TEMPR")) %>%
+  filter(value!=0) %>%
+  dplyr::left_join(df_cutoff_values, by = "name") %>% 
+  filter(!name %in% c("BPL", "BPH")) %>%
+  filter((name == "RESP" & value<=50 & value>=1) | name != "RESP") %>%
+  filter(name == excon) %>%
+  mutate(abn_value = (value -median_of_range) %>% 
+           abs()) %>% 
+  group_by(name) %>% 
+  mutate(sd_name = sd(abn_value),
+         abn_value_std = abn_value/range_of_safe) %>% 
+  ungroup() %>% 
+  dplyr::select(JIPAD_ID, PT_ID, ADM_DT, dt, sub_DT, name, value, abn_value,abn_value_std) %>%
+  distinct() %>% 
+  group_by(JIPAD_ID) %>% 
+  arrange(JIPAD_ID, dt) %>% 
+  mutate(hour = sub_DT/3600) %>%
+  mutate(hrs = as.numeric(hour)) %>%
+  filter(hrs < 72) %>% 
+  mutate(dt_num = as.numeric(dt)) %>% 
+  mutate(lag_dt = lag(dt),
+         lag_dt_num = as.numeric(lag_dt),
+         delta_obs_num = dt_num - lag_dt_num,
+         delta_obs_time = (dt - lag_dt) %>% 
+           as.numeric())  %>% 
+  mutate(lead_dt = lead(dt),
+         lead_dt_num = as.numeric(lead_dt),
+         next_obs_num = dt_num - lead_dt_num,
+         next_obs_time = (dt - lead_dt_num) %>% 
+           as.numeric()) %>% 
+  mutate(delta_obs_time_cmp = if_else(delta_obs_num ==0, NA, delta_obs_num) %>% 
+           vctrs::vec_fill_missing(., direction = "down") %>% 
+           if_else(is.na(.), 0, .) %>% 
+           magrittr::divide_by(3600) %>% 
+           magrittr::divide_by(24)) %>% 
+  mutate(next_obs_time_cmp = if_else(next_obs_num ==0, NA, next_obs_num) %>%
+           vctrs::vec_fill_missing(., direction = "up") %>%
+           magrittr::divide_by(3600) %>%
+           magrittr::divide_by(24) %>% 
+           magrittr::multiply_by(-1) %>% 
+           if_else(is.na(.), 
+                   hrs %>% 
+                     magrittr::divide_by(24),
+                   .)
+         ) %>%
+  # mutate(next_obs_time_cmp_wohrs = if_else(next_obs_num ==0, NA, next_obs_num) %>%
+  #          vctrs::vec_fill_missing(., direction = "up") %>%
+  #          magrittr::divide_by(3600) %>%
+  #          magrittr::divide_by(24) %>% 
+  #          magrittr::multiply_by(-1)
+  #        ) %>%
+  mutate(ind_j = factor(dt) %>% as.numeric()) %>% 
+  ungroup() %>% 
+  mutate(ind_i = factor(JIPAD_ID) %>% as.numeric()) %>% 
+  #pt ind filtering
+  # filter(ind_i == 9) %>% 
+  # mutate(ind_i = factor(JIPAD_ID) %>% as.numeric()) %>% 
+  mutate(ind_ij = ((ij_coef * ind_i) + ind_j) %>% 
+           factor() %>% 
+           as.numeric()) %>% 
+  mutate(ind_k = factor(name) %>% 
+           as.numeric())  %>% 
+  filter(ind_i <= max_i)
+
+
+  df_j %>% 
+    group_by(name) %>% 
+    summarise(sd_name = sd(abn_value_std))  %>% 
+    print()
+  
+  df_j_ijdt <- df_j %>% 
+    dplyr::select(ind_i, ind_j, ind_ij, delta_obs_time_cmp, next_obs_time_cmp,
+                  # next_obs_time_cmp_wohrs,next_obs_num, next_obs_time, 
+                  hrs) %>% 
+    distinct()
+  total_obs <- df_j$ind_ij %>% 
+  max()
+  total_pts <- df_j$ind_i %>% 
+    max()
+  total_name <- df_j$ind_k %>% 
+    max()
+  total_measure <- df_j %>% nrow()
+  
+  data <- list(
+    grainsize= 1,
+    total_pts = total_pts,
+    total_obs = total_obs,
+    total_name = total_name,
+    total_measure = total_measure,
+    
+    obs_is = df_j_ijdt$ind_i,
+    obs_js = df_j_ijdt$ind_j,
+    obs_ijs = df_j_ijdt$ind_ij,
+    obs_dts = df_j_ijdt$delta_obs_time_cmp,
+    
+    mes_is = df_j$ind_i,
+    mes_ijs = df_j$ind_ij,
+    mes_ks = df_j$ind_k,
+    mes_values = df_j$value,
+    mes_abn_values = df_j$abn_value_std
+  )
+  
+  p_pre <- ggplot()+
+  theme_pubr(legend = c(0.8, 0.8))+
+  geom_histogram(data = df_j,
+                 aes(x=abn_value_std, fill=name),
+                 color="black",
+                 position = "dodge")+
+  coord_cartesian(expand = F)
+# +
+#   scale_x_log10()
+# +
+#   facet_wrap(~name)
+  p_pre %>% grid::grid.draw()
+  
+  tic()
+
+  ft1 <- stan(
+    file = f_stn,
+    data = data,
+    seed = 12345,
+    iter = 5000,
+    warmup = 3000,
+    thin = 1,
+    chains = c_and_c,
+    control = list(
+      adapt_delta = 0.90,
+      max_treedepth = 15)
+    ,cores = parallel::detectCores()
+    ,save_warmup = F
+    ,include = F
+    ,pars = ex_pars
+  )
+
+  toc()
+
+  pairs(ft1, pars = prs)
+
+  ft1 %>% rhat() %>% mcmc_rhat()
+
+  stan_ac(ft1,pars =prs) %>% grid::grid.draw()
+
+  stan_dens(ft1,
+          pars =prs,
+          separate_chains = T) %>% grid::grid.draw()
+
+  stan_trace(ft1,inc_warmup=F,
+           pars =prs) %>% grid::grid.draw()
+
+  df_m_smr <- summary(ft1)$summary
+
+  df_m_smr %>% openxlsx::write.xlsx(., f_out_smr)
+
+
+  if(f_out_l != f_stn){
+  l_eval[[excon ]] <- 
+    list() %>%
+      append_list(ft1) %>%
+      append_list(df_j_ijdt) %>%
+      append_list(df_j)  %>%
+      saveRDS(f_out_l)
+  }
+  toc()
+}
+
+```
+
+
+```{r}
+# df <- l_eval$RESP$df_j_ijdt
+# df <- l_eval$TEMPR$df_j_ijdt
+```
+
+
+```{r}
+sessionInfo()
+```
+

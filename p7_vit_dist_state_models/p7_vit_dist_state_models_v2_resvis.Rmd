@@ -1,0 +1,740 @@
+---
+title: "p7_vit_dist_state_models"
+author: "fk506cni"
+date: "2024-09-22"
+output: html_document
+editor_options: 
+  chunk_output_type: console
+---
+
+## phase1:
+vital sign -> hidden status
+ 
+
+```{r}
+require(tidyverse)
+require(openxlsx)
+require(jsonlite)
+require(officer)
+require(ggpubr)
+require(IRdisplay)
+require(data.table)
+require(lubridate)
+require(repr)
+require(tictoc)
+require(kernlab)
+# require(curl)
+require(svglite)
+```
+
+```{r}
+ts <- Sys.time()  %>% 
+    as.character() %>% 
+    str_remove_all(., "[-:]*") %>% 
+    str_replace(.," ", "_")
+ts
+```
+
+```{r}
+outputdir <- "./figs/"
+if(!dir.exists(outputdir)){
+  dir.create(outputdir)
+}
+
+ggsave2_tri <- function(plot, wid = 9, hei=9){
+  plot_name <- deparse(substitute(plot))
+  
+  #png
+  file_name <- paste(outputdir,plot_name, ".png", sep = "",collapse = "")
+  ggsave(filename = file_name,plot = plot,device = "png",width = wid, height = hei,dpi = 300,units = "cm")
+  
+  
+  #pdf
+  file_name <- paste(outputdir,plot_name, ".pdf", sep = "",collapse = "")
+  # ggsave(filename = file_name,plot = plot,device = "pdf",width = wid, height = hei,dpi = 300,units = "cm")
+  
+  #pptx
+  file_name <- paste(outputdir,plot_name, ".pptx", sep = "",collapse = "")
+  plot_ed <- rvg::dml(ggobj = plot,width = wid, height = hei)
+  
+  doc <- read_pptx() %>%
+    add_slide('Title and Content', 'Office Theme') %>%
+    ph_with(value = "", location = ph_location_type(type = "title")) %>%
+    ph_with(value = plot_ed, location = ph_location(type = "body",width = cm2inch(wid), height = cm2inch(hei),left = 2, top = 2))
+  doc %>%
+    print(target = file_name)
+  
+}
+
+
+
+inch2cm <- function(x){
+  return(x/0.39370)
+}
+cm2inch <- function(x){
+  return(0.39370*x)
+}
+
+p2cm <- function(x){
+  return(as.integer(0.008466666666666667 * x))
+}
+
+cm2p <- function(x){
+  return(as.integer(118.11023622047244 *x))
+}
+```
+
+```{r}
+f_in <- "../p1_whole_admtc_vit_fromCIS/dat/ir_admtc_20240329_075221.rds"
+df_admtc <- readRDS(f_in)
+
+# f2_in <- "../p1_whole_admtc_vit_fromCIS/dat/ir_vit_20240329_075221.rds"
+f2_in <- "../p1_whole_admtc_vit_fromCIS/dat/vit_20240329_075221.rds"
+df_vit <- readRDS(f2_in)  %>% 
+  mutate(BPM = case_when(
+    BPH * BPL > 0 ~ BPL + (BPH - BPL) / 3,
+    BPH * BPL == 0 ~ 0,
+    T ~ 0
+  ))
+
+f3_in <- "../p2_unplanned_ICUadmission/dat/icu_target20240517_044716.297905.rds"
+df_icu_target <- readRDS(f3_in)
+
+f_setting <- "../p1_whole_admtc_vit_fromCIS/dat/setting_20240329_082442.rds"
+setting_list <- readRDS(f_setting)
+```
+
+```{r}
+df_vit <- df_vit %>%
+    mutate(dt = str_c(MEASURED_DATE, MEASURED_TIME, sep=" ") %>%
+        lubridate::ymd_hms())
+```
+
+
+```{r}
+# 正常範囲の定義
+cutoff_values <- list(
+  RESP = c(12, 24),
+  TEMPR = c(36, 38.4),
+  PULSE = c(70, 109),
+  BPM = c(70, 109))
+
+df_cutoff_values <- cutoff_values %>% 
+  as.data.frame() %>% 
+  t() %>% 
+  as.data.frame() %>% 
+  mutate(name = rownames(.)) %>% 
+  `colnames<-`(c("lower_limit", "upper_limit", "name")) %>% 
+  mutate(median_of_range = (lower_limit+upper_limit)/2) %>% 
+  mutate(range_of_safe = upper_limit - median_of_range)
+
+df_cutoff_values
+```
+
+
+```{r}
+ij_coef <- 1e+6
+
+max_i <- 500
+
+ # lag_dt, lead_dt, delta_obs_time,
+df_j <- left_join(df_vit,
+                  df_icu_target %>% 
+                    dplyr::select(PT_ID, JIPAD_ID, ADM_DT),
+                by = c("PT_ID"="PT_ID"), relationship = "many-to-many") %>% 
+  dplyr::select(PT_ID, ADM_DT, everything()) %>% 
+  mutate(sub_DT=ADM_DT-dt) %>% 
+  filter(sub_DT>=0) %>% 
+  # mutate(in_24h=sub_DT<=24*60*60) %>% 
+  # mutate(in_48h=sub_DT<=48*60*60) %>% 
+  # mutate(in_96h=sub_DT<=96*60*60) %>%
+  # dplyr::filter(in_96h) %>%
+  dplyr::select(PT_ID, ADM_DT, dt, sub_DT, everything()) %>%
+tidyr::pivot_longer(cols=c("PULSE", "RESP", "BPL", "BPH", "BPM", "TEMPR")) %>%
+  filter(value!=0) %>%
+  # filter(name %in% c("PULSE", "BPM")) %>%
+  dplyr::left_join(df_cutoff_values, by = "name") %>% 
+  # filter(name == "PULSE") %>%
+  filter(!name %in% c("BPL", "BPH")) %>%
+  filter((name == "RESP" & value<=50 & value>=1) | name != "RESP") %>%
+  # mutate(abn_value = case_when(
+  #   upper_limit<value ~ abs(value - upper_limit),
+  #   value<lower_limit ~ abs(lower_limit - value),
+  #   T ~ 0
+  # )) %>% 
+  mutate(abn_value = (value -median_of_range) %>% 
+           abs()) %>% 
+  group_by(name) %>% 
+  mutate(sd_name = sd(abn_value),
+         abn_value_std = abn_value/range_of_safe) %>% 
+  ungroup() %>% 
+  dplyr::select(JIPAD_ID, PT_ID, ADM_DT, dt, sub_DT, name, value, abn_value,abn_value_std) %>%
+  distinct() %>% 
+  group_by(JIPAD_ID) %>% 
+  arrange(JIPAD_ID, dt) %>% 
+  mutate(hour = sub_DT/3600) %>%
+  mutate(hrs = as.numeric(hour)) %>%
+  filter(hrs < 72) %>% 
+  mutate(dt_num = as.numeric(dt)) %>% 
+  mutate(lag_dt = lag(dt),
+         lag_dt_num = as.numeric(lag_dt),
+         delta_obs_num = dt_num - lag_dt_num,
+         delta_obs_time = (dt - lag_dt) %>% 
+           as.numeric())  %>% 
+  mutate(lead_dt = lead(dt),
+         lead_dt_num = as.numeric(lead_dt),
+         next_obs_num = dt_num - lead_dt_num,
+         next_obs_time = (dt - lead_dt_num) %>% 
+           as.numeric()) %>% 
+  mutate(delta_obs_time_cmp = if_else(delta_obs_num ==0, NA, delta_obs_num) %>% 
+           vctrs::vec_fill_missing(., direction = "down") %>% 
+           if_else(is.na(.), 0, .) %>% 
+           magrittr::divide_by(3600) %>% 
+           magrittr::divide_by(24)) %>% 
+  mutate(next_obs_time_cmp = if_else(next_obs_num ==0, NA, next_obs_num) %>%
+           vctrs::vec_fill_missing(., direction = "up") %>%
+           magrittr::divide_by(3600) %>%
+           magrittr::divide_by(24) %>% 
+           magrittr::multiply_by(-1) %>% 
+           if_else(is.na(.), hrs, .)
+         ) %>%
+  mutate(ind_j = factor(dt) %>% as.numeric()) %>% 
+  ungroup() %>% 
+  mutate(ind_i = factor(JIPAD_ID) %>% as.numeric()) %>% 
+  #pt ind filtering
+  # filter(ind_i == 9) %>% 
+  # mutate(ind_i = factor(JIPAD_ID) %>% as.numeric()) %>% 
+  mutate(ind_ij = ((ij_coef * ind_i) + ind_j) %>% 
+           factor() %>% 
+           as.numeric()) %>% 
+  mutate(ind_k = factor(name) %>% 
+           as.numeric())  %>% 
+  filter(ind_i <= max_i)
+
+
+df_j %>% 
+  group_by(name) %>% 
+  summarise(sd_name = sd(abn_value_std))
+#   filter(ind_i %in% c(1, 9))
+# %>% 
+#   # filter(ind_i %in% c(9,10))
+  # group_by(JIPAD_ID, dt, name) %>% 
+  # mutate(n=n()) %>% 
+  # filter(n!=1)
+  # summarise(n=n())
+  
+  
+  # mutate(hour = sub_DT/3600) %>% 
+  # mutate(hrs = as.numeric(hour)) %>% 
+  # mutate(hrs_int = round(hrs)) %>%
+  # # not input date -> MEASURED_DATE
+  # group_by(PT_ID, name, MEASURED_DATE) %>% 
+  # mutate(vit_mes_count = n()) %>%
+  # filter(hrs < 168) %>% 
+  # # filter(hrs < 48) %>% 
+  # # after ICU admission, vit count may over 36 in same date. so this filtering is not apropriate. removed.
+  # # filter(vit_mes_count <= 36) %>%
+  # filter((name == "RESP" & value<=50 & value>=1) | name != "RESP") %>%
+  # mutate(nhrs = -hrs)
+
+df_j_ijdt <- df_j %>% 
+  dplyr::select(ind_i, ind_j, ind_ij, delta_obs_time_cmp,hrs) %>% 
+  distinct()
+```
+
+
+```{r}
+total_obs <- df_j$ind_ij %>% 
+  max()
+total_pts <- df_j$ind_i %>% 
+  max()
+total_name <- df_j$ind_k %>% 
+  max()
+total_measure <- df_j %>% nrow()
+
+data <- list(
+  grainsize= 1,
+  total_pts = total_pts,
+  total_obs = total_obs,
+  total_name = total_name,
+  total_measure = total_measure,
+  
+  obs_is = df_j_ijdt$ind_i,
+  obs_js = df_j_ijdt$ind_j,
+  obs_ijs = df_j_ijdt$ind_ij,
+  obs_dts = df_j_ijdt$delta_obs_time_cmp,
+  
+  mes_is = df_j$ind_i,
+  mes_ijs = df_j$ind_ij,
+  mes_ks = df_j$ind_k,
+  mes_values = df_j$value,
+  mes_abn_values = df_j$abn_value_std
+)
+```
+
+
+```{r}
+library(ggfortify)
+library(gghighlight)
+
+library(rstan)
+library(bayesplot)
+
+# 計算の高速化
+rstan_options(auto_write = TRUE)
+options(mc.cores = parallel::detectCores())
+```
+
+
+```{r}
+p_pre <- ggplot()+
+  theme_pubr(legend = c(0.8, 0.8))+
+  geom_histogram(data = df_j,
+                 aes(x=abn_value_std, fill=name),
+                 color="black",
+                 position = "dodge")+
+  coord_cartesian(expand = F)
+# +
+#   scale_x_log10()
+# +
+#   facet_wrap(~name)
+p_pre
+
+ggsave2_tri(p_pre, wid = 15, hei = 15)
+```
+
+
+```{r}
+ex_pars <- c(
+  "dmg_ijs_div",
+  "trend_ijs_div",
+  "as0", "mes_mu_ijks", "mu_phi_ijs", "sigma_dt", "all_outs"
+)
+```
+
+
+```{r}
+# tic()
+# c_and_c <- 4
+# # f_stn <- "ssm_701_1_ltm.stan"
+# 
+f_stn <- "ssm_801_4_redvar.stan"
+# f_stn <- "ssm_801_4_redvar_rs.stan"
+# ft1 <- stan(
+#   file = f_stn,
+#   data = data,
+#   seed = 12345,
+#   iter = 5000,
+#   warmup = 3000,
+#   thin = 1,
+#   chains = c_and_c,
+#   control = list(
+#     adapt_delta = 0.90,
+#     max_treedepth = 15)
+#   ,cores = parallel::detectCores()
+#   ,save_warmup = F
+#   ,include = F
+#   ,pars = ex_pars
+# )
+# toc()
+```
+
+
+```{r}
+# ft1
+```
+
+```{r}
+# f_out <- f_stn %>% 
+#   str_replace("\\.stan", "_fit.rds")
+# print(f_out)
+# if(f_out != f_stn){
+#   saveRDS(ft1, f_out)
+# }
+
+```
+
+```{r}
+append_list <- function(l, x){
+  xname  <- deparse(substitute(x))
+  l[[xname]] <- x
+  return(l)
+}
+
+# load function
+get_vals <- function(l){
+  lnames <- names(l)
+  for(n in lnames){
+    assign(n, l[[n]], pos = .GlobalEnv)
+  }
+  return(lnames)
+}
+```
+
+
+```{r}
+f_out_l <- f_stn %>% 
+  str_replace("\\.stan", "_res_list.rds")
+f_out_l <- "./ssm_801_4_redvar_rs_res_list.rds"
+# l_res_phase1 <- 
+# 
+# if(f_out_l != f_stn){
+#   list() %>% 
+#     append_list(ft1) %>% 
+#     append_list(df_j_ijdt) %>% 
+#     append_list(df_j) %>% 
+#     saveRDS(f_out_l)
+# }
+```
+
+```{r}
+f_out_l %>% 
+  readRDS() %>% 
+  get_vals()
+```
+
+
+```{r}
+prs <- c("dmg_ijs[1]", "dmg_ijs[2]", "dmg_ijs[3]"
+         # ,"dmg_ijs[4]",
+         ,"phi_ijs[1]", "phi_ijs[2]", "phi_ijs[3]"
+         # , "phi_ijs[4]"
+         ,"as[1]"
+         ,"coef_dt_div"
+         # , "as[2]"
+         )
+
+# prs <- c("as"
+#          )
+```
+
+```{r}
+pairs(ft1, pars = prs)
+```
+
+```{r}
+# stan()
+
+# stan_trace(ft1, pars = prs)
+```
+
+```{r}
+stan_ac(ft1,pars =prs)
+```
+
+```{r}
+stan_dens(ft1,
+          pars =prs,
+          separate_chains = T)
+```
+
+```{r}
+stan_trace(ft1,inc_warmup=F,
+           pars =prs)
+```
+
+
+```{r}
+df_m_smr <- summary(ft1)$summary
+
+# df_m_smr %>% openxlsx::write.xlsx(., "./figs/stan_smr.xlsx")
+```
+
+
+```{r}
+# pairs(ft1)
+# ft1
+# pairs(ft1$`phi_ijs[1]`,ft1$`phi_ijs[2]`)
+```
+
+
+```{r}
+
+rh <- ft1 %>% rhat() %>% as.data.frame()  %>% 
+  `colnames<-`(c("rh")) %>% 
+  mutate(nms =rownames(.))
+rh %>% head()
+# rh %>% rownames()
+
+res <- ft1 %>% 
+  rstan::extract() 
+res$dmg_ijs %>% apply(., 2, mean) %>% MASS::truehist()
+res$dmg_ijs %>% apply(., 1, var) %>% MASS::truehist()
+
+res$dmg_ijs_div %>% apply(., 1, var) %>% MASS::truehist()
+
+res$pts_base_is %>% apply(., 1, var) %>% MASS::truehist()
+
+# res$mu_ijs %>% apply(., 1, var) %>% MASS::truehist()
+
+ft1 %>% rhat() %>% mcmc_rhat()
+
+
+df_j_ijdt_res <- df_j_ijdt %>% 
+  mutate(
+    # estim_mean_sigma = 
+    #        res$sigma_dt %>% 
+    #        apply(., 2, mean),
+         estim_mean_dmg = 
+           res$dmg_ijs %>% 
+           apply(., 2, mean)
+         ) %>% 
+  filter(ind_i <= 5)
+# %>% 
+#   filter(ind_i %in% c(1, 9))
+
+
+df_j_res <- df_j %>% 
+  mutate(
+    # estim_mean_mu = res$mu_ijs %>% 
+    #        apply(., 2, mean),
+         estim_mean_phi = 
+           res$phi_ijs %>% 
+           apply(., 2, mean))  %>% 
+  # filter(ind_i %in% c(1, 9))
+  # filter( ind_i == 1 )
+#   filter(5 < ind_i ) %>% 
+  filter( ind_i <= 5 ) %>% 
+  left_join(
+    df_j_ijdt_res %>% 
+      select(ind_i, ind_j, ind_ij, estim_mean_dmg),
+    by=c("ind_i", "ind_j", "ind_ij")
+  )
+
+```
+
+```{r}
+p_res <- ggplot()+
+  theme_pubr(legend = c(0.1,0.5), base_family = "Times")+
+  geom_point(data = df_j_res,
+             aes(x=-hrs,
+                 y=abn_value_std,
+                 color=name))+
+  geom_line(data = df_j_res,
+             aes(x=-hrs,
+                 y=estim_mean_phi,
+                 color=name,
+                 group=ind_k))+
+  geom_line(data = df_j_ijdt_res,
+             aes(x=-hrs,
+                 y=estim_mean_dmg),
+    color="black")+
+  facet_wrap(~ind_i, ncol = 1)
+p_res
+
+p_res2 <- ggplot()+
+  theme_pubr(legend = "none", base_family = "Times")+
+  geom_line(data = df_j_ijdt_res,
+             aes(x=-hrs,
+                 y=estim_mean_dmg),
+    color="black")+
+  facet_wrap(~ind_i, ncol = 1)
+
+
+p_res2
+
+# ggsave2_tri(p_res, wid = 15, hei = 26)
+# ggsave2_tri(p_res2, wid = 15, hei = 26)
+```
+
+```{r}
+as <- res$as %>% 
+           apply(., 2, mean) %>% 
+  data.frame(as = .)  %>% 
+  mutate(ind_k = c(1:nrow(.)))
+
+df_j_res_smr <- df_j %>% select(ind_k, name) %>% 
+  distinct() %>% 
+  left_join(as, by="ind_k")
+df_j_res_smr
+```
+
+
+```{r}
+
+df_j_ijdt_res <- df_j_ijdt %>% 
+  mutate(
+    # estim_mean_sigma = 
+    #        res$sigma_dt %>% 
+    #        apply(., 2, mean),
+         estim_mean_dmg = 
+           res$dmg_ijs %>% 
+           apply(., 2, mean)
+         ) 
+# %>% 
+#   filter(ind_i <= 5)
+# %>% 
+#   filter(ind_i %in% c(1, 9))
+
+
+df_j_res <- df_j %>% 
+  mutate(
+    # estim_mean_mu = res$mu_ijs %>% 
+    #        apply(., 2, mean),
+         estim_mean_phi = 
+           res$phi_ijs %>% 
+           apply(., 2, mean))  %>% 
+  # filter(ind_i %in% c(1, 9))
+  # filter( ind_i == 1 )
+#   filter(5 < ind_i ) %>% 
+  # filter( ind_i <= 5 ) %>% 
+  left_join(
+    df_j_ijdt_res %>% 
+      select(ind_i, ind_j, ind_ij, estim_mean_dmg),
+    by=c("ind_i", "ind_j", "ind_ij")
+  )
+
+
+# df_j_res %>% 
+#   select(estim_mean_dmg, abn_value_std, name) %>% 
+#   distinct() %>% 
+#   nrow()
+```
+
+```{r}
+df_j_res_smr_sub <- df_j_res_smr %>% 
+  select(as, name)
+df_j_res_sub <- df_j_res %>% 
+  select(estim_mean_dmg,
+        abn_value_std,
+        name)
+list() %>% 
+  append_list(df_j_res_smr_sub) %>% 
+  append_list(df_j_res_sub) %>% 
+  saveRDS("p_resp_ds.rds")
+
+
+```
+
+
+
+```{r}
+p_resp <- ggplot()+
+  theme_pubr(base_family = "Times")+
+  theme(aspect.ratio = 1)+
+  geom_hline(yintercept = 1, color="black")+
+  geom_abline(data = df_j_res_smr,
+              aes(slope=as,color=name,intercept = 0))+
+  geom_abline(slope = 1, intercept = 0, color="black")+
+  geom_point(
+    data = df_j_res,
+    aes(x=estim_mean_dmg,
+        y=abn_value_std,
+        color=name),
+    size=0.1,
+    alpha=0.5
+  )+
+  coord_cartesian(expand = F)+
+  xlim(0, 4)+ylim(0,4)+facet_wrap(~name, nrow = 2)
+p_resp
+
+
+
+ggsave(filename="./figs/ggplot_test.svg", plot=p_resp
+       ,width=15, height=18, dpi=500, units="cm", device='svg')
+
+
+p_resp_d <- ggplot()+
+  theme_pubr(base_family = "Times")+
+  theme(aspect.ratio = 1)+
+  geom_density2d(
+    data = df_j_res,
+    aes(x=estim_mean_dmg,
+        y=abn_value_std,
+        color=name)
+  )+
+  geom_hline(yintercept = 1, color="black")+
+  geom_abline(slope = 1, intercept = 0, color="black")+
+  geom_abline(data = df_j_res_smr,
+              aes(slope=as,color=name,intercept = 0))+
+  coord_cartesian(expand = F)+
+  xlim(0, 4)+ylim(0,4)+facet_wrap(~name, nrow = 2)
+p_resp_d
+ggsave2_tri(p_resp_d, wid = 15, hei = 18)
+```
+
+2026/02/06 カラー変更＋保存関数設置
+```{r}
+okabe_ito4 <- c(
+  "BPM"   = "#E69F00",  # orange
+  "PULSE" = "#009E73",  # bluish green
+  "RESP"  = "#56B4E9",  # sky blue
+  "TEMPR" = "#CC79A7"   # reddish purple
+)
+
+ggsave_svg_simple <- function(plot, filename, width = 8.5, height = 8.5, units = "cm") {
+  if (!requireNamespace("svglite", quietly = TRUE)) install.packages("svglite")
+  ggsave(filename, plot = plot, device = svglite::svglite,
+         width = width, height = height, units = units)
+}
+
+ggsave_pdf_simple <- function(plot, filename, width = 8.5, height = 8.5, units = "cm") {
+  ggsave(filename, plot = plot, device = cairo_pdf,
+         width = width, height = height, units = units)
+}
+
+ggsave_png_simple <- function(plot, filename, width = 170, height = 120, units = "mm", dpi = 600) {
+  ggsave(filename, plot = plot, device = "png",
+         width = width, height = height, units = units, dpi = dpi)
+}
+```
+
+```{r}
+# 順序固定（legend / facet を安定化）
+df_j_res <- df_j_res %>%
+  mutate(name = factor(name, levels = names(okabe_ito4)))
+
+df_j_res_smr <- df_j_res_smr %>%
+  mutate(name = factor(name, levels = names(okabe_ito4)))
+
+p_resp <- ggplot() +
+  theme_pubr(base_family = "Times") +
+  theme(aspect.ratio = 1) +
+  geom_hline(yintercept = 1, color = "black") +
+  # 回帰線など（データフレームに slope がある想定）
+  geom_abline(
+    data = df_j_res_smr,
+    aes(slope = as, intercept = 0, color = name),
+    linewidth = 0.8
+  ) +
+  geom_abline(slope = 1, intercept = 0, color = "black", linewidth = 0.8) +
+  geom_point(
+    data = df_j_res,
+    aes(x = estim_mean_dmg, y = abn_value_std, color = name),
+    size = 0.1, alpha = 0.5
+  ) +
+  scale_color_manual(
+    values = okabe_ito4,
+    name = "Measurement category"   # legendタイトルを英語に
+  ) +
+  coord_cartesian(expand = FALSE) +
+  xlim(0, 4) + ylim(0, 4) +
+  facet_wrap(~name, nrow = 2) +
+  labs(x = "Estimated mean severity", y = "Standardized abnormality score")
+
+p_resp
+```
+
+
+```{r}
+fn <- file.path("figs", "p_resp.pdf")
+fn
+
+if (file.exists(fn)) file.remove(fn)
+
+ggsave(
+  filename = fn,
+  plot = p_resp_export,
+  device = "pdf",
+  width = 170, height = 120, units = "mm",
+  limitsize = FALSE,
+  useDingbats = FALSE
+)
+
+```
+
+
+```{r}
+sessionInfo()
+```
+
