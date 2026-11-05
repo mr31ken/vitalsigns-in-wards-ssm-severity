@@ -67,9 +67,16 @@ nohup Rscript -e "rmarkdown::render('p7_vit_dist_state_models_v2_onlys_fix202609
 
 ## Software
 
-R 4.3.3, rstan 2.32.6 (StanHeaders 2.32.10), tidyverse 2.0.0, ROCR 1.0-11, lme4 1.1-35.1
-(as recorded in the knitted outputs of steps 1–2); pROC and sandwich for step 3; Python 3
-with matplotlib for step 4.
+R 4.3.3, rstan 2.32.6 (StanHeaders 2.32.10, Stan 2.32.2), tidyverse 2.0.0, ROCR 1.0-11,
+lme4 1.1-35.1 (as recorded in the knitted outputs of steps 1–2); pROC 1.18.4, sandwich 3.1-1
+and ggplot2 3.4.4 for step 3; Python 3 with matplotlib for step 4. Steps 1–3 were run on
+RStudio Server 2023.09.0+463 / JupyterLab 4.3.5 (Ubuntu 22.04).
+
+The numbers in the article come from the step 3 run of 2026-11-06, whose inputs were
+`eval_sources_model_fix20260930.rds` (MD5 8a6228457debe503fe01188de6fa76c9) and
+`eval_sources_model_on_add_fix.rds` (MD5 8d3f50252de1f91407bd8144015ccc66). In that run all
+nine fits had R-hat ≤ 1.003 and n_eff ≥ 1,100 for every parameter, with no divergent
+transitions.
 
 ## License and citation
 
