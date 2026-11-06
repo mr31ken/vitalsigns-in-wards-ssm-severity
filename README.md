@@ -1,5 +1,7 @@
 # Latent severity from sparse ward vital signs (state–space model)
 
+[![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.24020335.svg)](https://doi.org/10.5281/zenodo.24020335)
+
 Analysis code for:
 
 > Saito K, Fukuyama K, Mori Y, Ueshima H, Tsutsumi T, Takeda C, Kai S, Kuroda T.
@@ -134,3 +136,7 @@ working notebooks, including checks on individual patients, are not published.
 
 Code: MIT License (see `LICENSE`). Please cite the article above and this repository
 (`CITATION.cff`).
+
+Archived on Zenodo: version 1.0.0, the version used for the article,
+[doi:10.5281/zenodo.24020336](https://doi.org/10.5281/zenodo.24020336); all versions,
+[doi:10.5281/zenodo.24020335](https://doi.org/10.5281/zenodo.24020335).
