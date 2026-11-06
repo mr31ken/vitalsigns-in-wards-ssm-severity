@@ -1,0 +1,94 @@
+---
+title: "p1_02_whole_in_range"
+author: "Saito"
+date: "2024-03-29"
+output: html_document
+editor_options: 
+  chunk_output_type: console
+---
+
+```{r}
+require(tidyverse)
+require(openxlsx)
+require(jsonlite)
+require(officer)
+require(ggpubr)
+require(IRdisplay)
+require(data.table)
+require(lubridate)
+require(repr)
+require(tictoc)
+```
+
+```{r}
+ts <- Sys.time()  %>% 
+    as.character() %>% 
+    str_remove_all(., "[-:]*") %>% 
+    str_replace(.," ", "_")
+ts
+```
+
+```{r}
+# exclude(unnecessary WARDs & SECTIONs & vit categories)
+ex_wards <- c("集中治療部", "Ｃ/ＨＣＵ", "ＣＣＵ", "ＥＳＩＣＵ", "ＳＣＵ", "ＮＩＣＵ", "ＧＣＵ")
+ex_sects <- c("循環器内科", "心臓血管外科", "呼吸器内科", "初期診療・救急科", "呼吸器外科", "小児科", "小児外科", "ＮＩＣＵ", "未熟児センタ", "救急部", "脳神経外科")
+ex_categ <- c("SPO2", "HEART_RATE")
+
+setting_list <- list()
+setting_list$ex_wards <- ex_wards
+setting_list$ex_sects <- ex_sects
+setting_list$ex_categ <- ex_categ
+
+f_setting <- c("./dat/setting_", ts, ".rds") %>% 
+  str_c(collapse = "")
+saveRDS(setting_list, f_setting)
+```
+
+```{r}
+f_in <- "./dat/admtc_20240329_075221.rds"
+
+df_admtc_org <- readRDS(f_in)
+
+f2_in <- "./dat/vit_20240329_075221.rds"
+
+df_vit_org <- readRDS(f2_in)
+
+
+
+```
+
+```{r}
+df_admtc <- df_admtc_org %>% 
+  filter(!SECTION %in% ex_sects) %>% 
+  filter(!WARD %in% ex_wards)
+
+df_vit <- df_vit_org %>% 
+  filter(!SECTION %in% ex_sects) %>% 
+  filter(!WARD %in% ex_wards)
+```
+
+```{r}
+f_out <- f_in %>% 
+  str_replace("admtc","ir_admtc")
+
+f2_out <- f2_in %>% 
+  str_replace("vit","ir_vit")
+
+saveRDS(df_admtc, f_out)
+f_out
+
+saveRDS(df_vit, f2_out)
+f2_out
+```
+
+> f_out
+[1] "./dat/ir_admtc_20240329_075221.rds"
+> 
+> saveRDS(df_vit, f2_out)
+> f2_out
+[1] "./dat/ir_vit_20240329_075221.rds"
+
+```{r}
+sessionInfo()
+```
+

@@ -1,6 +1,7 @@
 # Input (not included): ward vital signs before ICU admission (long format)
 
-Used only for the aPS-4 comparison in `p7_final_numbers_v23.Rmd`.
+Written by `p5_build_df_j.R` (run 2024-05-24; see the script header for its provenance). Used only for
+the aPS-4 comparison in `p7_final_numbers_v23.Rmd`.
 Not distributable (personal health information).
 
 | File | MD5 |

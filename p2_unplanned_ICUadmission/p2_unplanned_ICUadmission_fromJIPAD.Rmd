@@ -1,0 +1,364 @@
+---
+title: "Unplanned_ICUadmission_fromJIPAD"
+author: "Saito"
+date: "2024-05-17"
+output: html_document
+editor_options: 
+  chunk_output_type: console
+---
+
+```{r}
+require(tidyverse)
+require(openxlsx)
+require(jsonlite)
+require(officer)
+require(ggpubr)
+require(IRdisplay)
+require(data.table)
+require(lubridate)
+require(repr)
+require(tictoc)
+```
+
+
+```{r}
+ts <- Sys.time()  %>% 
+    as.character() %>% 
+    str_remove_all(., "[-:]*") %>% 
+    str_replace(.," ", "_")
+ts
+```
+
+```{r}
+outputdir <- "./figs/"
+if(!dir.exists(outputdir)){
+  dir.create(outputdir)
+}
+
+ggsave2_tri <- function(plot, wid = 9, hei=9){
+  plot_name <- deparse(substitute(plot))
+  
+  #png
+  file_name <- paste(outputdir,plot_name, ".png", sep = "",collapse = "")
+  ggsave(filename = file_name,plot = plot,device = "png",width = wid, height = hei,dpi = 300,units = "cm")
+  
+  
+  #pdf
+  file_name <- paste(outputdir,plot_name, ".pdf", sep = "",collapse = "")
+  # ggsave(filename = file_name,plot = plot,device = "pdf",width = wid, height = hei,dpi = 300,units = "cm")
+  
+  #pptx
+  file_name <- paste(outputdir,plot_name, ".pptx", sep = "",collapse = "")
+  plot_ed <- rvg::dml(ggobj = plot,width = wid, height = hei)
+  
+  doc <- read_pptx() %>%
+    add_slide('Title and Content', 'Office Theme') %>%
+    ph_with(value = "", location = ph_location_type(type = "title")) %>%
+    ph_with(value = plot_ed, location = ph_location(type = "body",width = cm2inch(wid), height = cm2inch(hei),left = 2, top = 2))
+  doc %>%
+    print(target = file_name)
+  
+}
+
+
+
+inch2cm <- function(x){
+  return(x/0.39370)
+}
+cm2inch <- function(x){
+  return(0.39370*x)
+}
+
+p2cm <- function(x){
+  return(as.integer(0.008466666666666667 * x))
+}
+
+cm2p <- function(x){
+  return(as.integer(118.11023622047244 *x))
+}
+```
+
+```{r}
+f_in <- "../p1_whole_admtc_vit_fromCIS/dat/admtc_20240329_075221.rds"
+df_all_admtc <- readRDS(f_in)
+
+f2_in <- "../p1_whole_admtc_vit_fromCIS/dat/ir_vit_20240329_075221.rds"
+df_vit <- readRDS(f2_in)
+
+f_setting <- "../p1_whole_admtc_vit_fromCIS/dat/setting_20240329_082442.rds"
+setting_list <- readRDS(f_setting)
+```
+
+```{r}
+d_in <- "../../dat/JIPAD/unlock/"
+fs3 <- list.files(path = d_in, pattern = ".xlsx", full.names = T)
+fs3
+```
+
+```{r}
+s2s <- function(v, s1, s2){
+  return (str_replace(v, s1, s2))
+}
+```
+
+```{r}
+l_df <- list()
+df_icu_org <- data.frame()
+for( f in fs3){
+    tag <- f %>%
+    str_extract("202[0-9]*") 
+    print(tag)
+    
+    df_f <- openxlsx::read.xlsx(xlsxFile = f)  %>%
+    mutate(退院日 = as.character(退院日),
+           その他の血液浄化 = as.character(その他の血液浄化))
+    df_icu_org <- bind_rows(df_icu_org, df_f)
+}
+```
+
+```{r}
+df_icu_org <- df_icu_org  %>%
+  rename(
+        JIPAD_ID = 入室管理番号, adult_ped_categ = 成人小児区分,
+        PT_ID = 患者ID, age = 入室時年齢, gender = 性別, HT = 身長,
+        BW = 体重, ADM_DT = 入室日時, disc_u_DT = 退室日時,
+        AP3score = APACHEⅢ.スコア, AP3mortality = APACHEⅢ.入院予測死亡率,
+        AP2score = APACHEIIスコア, AP2mortality = APACHII_院内予測死亡率,
+        SP2score = SAPSIIscore計, SP2mortality = SAPASII_院内予測死亡率,
+        adm_path = 入室経路, adm_type = 入室形式, adm_categ = 入室区分,
+        disc_u_finalstate = 退室時転帰, disease_name = 病名テキスト,
+        op_name = 手術名テキスト, disease_code = 主病名コード,
+        nyuin_day =入院日, taiin_day = 退院日, e_call = 緊急コール,
+        disc_outcome = 退院時転帰, CPA = 心停止蘇生後, readmission = 再入室,
+        main_disease = 主病名, CHF = 心不全, RespF = 呼吸不全,
+        HepatF = 肝不全, cirrhosis = 肝硬変, lymphoma = リンパ腫, 
+        metastasis = 癌転移, imm_sup = 免疫抑制, onHD = 維持透析,
+        urine_vol = 入室後24時間の尿量,
+        AKI = 入室後24時間以内のAKI, MV = 入室後24時間以内の人工呼吸,
+        LOMV = 人工呼吸継続時間L, minBP = 収縮期血圧)
+```
+
+2024/04/26 ex_indについて  
+入室管理番号との使い分けは？通し番号も元々ついている  
+2024/05/09時点で未確認 次回再度確認を
+```{r}
+# df_icu_org <- df_icu_org %>%
+#     mutate(ex_ind = PT_ID %>% factor() %>% as.numeric()) %>% 
+#     filter("adm_type" != "予定")
+```
+
+```{r}
+col_needs <- c("JIPAD_ID", "adult_ped_categ", "PT_ID", "age", "gender", "HT",
+        "BW", "ADM_DT", "disc_u_DT", "AP3score", "AP3mortality", "AP2score",
+        "AP2mortality", "SP2score", "SP2mortality","adm_path", "adm_type",
+        "adm_categ", "disc_u_finalstate", "disease_name", "op_name",
+        "disease_code", "nyuin_day", "taiin_day", "e_call", "disc_outcome",
+        "CPA", "readmission", "main_disease", "CHF", "RespF", "HepatF",
+        "cirrhosis", "lymphoma", "AIDS", "AML_MM", "metastasis", "imm_sup",
+        "onHD", "urine_vol", "AKI", "MV", "LOMV", "minBP")
+```
+
+```{r}
+df_icu_org <- df_icu_org  %>%
+    dplyr::select(one_of(col_needs)) %>% 
+  mutate(disc_outcome = if_else(disc_outcome == "死亡", 1, 0)) %>%
+  mutate(e_call = if_else(e_call == "コードブルー", 1, 0)) %>%
+  mutate(CPA = if_else(CPA == "Yes", 1, 0)) %>%
+  mutate(MV = if_else(MV == "Yes", 1, 0)) %>%
+  mutate(AKI = if_else(AKI == "Yes", 1, 0)) %>%
+  mutate(taiin_day = if_else(is.na(as.numeric(taiin_day)), "45000", taiin_day) %>% 
+           as.numeric()) %>%
+  # taiin_dayに複数NAがあったので補正
+  mutate(readmission = if_else(readmission == "Yes", 1, 0)) %>% 
+  mutate(CHF = if_else(CHF == "Yes", 1, 0)) %>%
+  mutate(RespF = if_else(RespF == "Yes", 1, 0)) %>%
+  mutate(HepatF = if_else(HepatF == "Yes", 1, 0)) %>%
+  mutate(cirrhosis = if_else(cirrhosis == "Yes", 1, 0)) %>%
+  mutate(AIDS = if_else(AIDS == "Yes", 1, 0)) %>%
+  mutate(AML_MM = if_else(AML_MM == "Yes", 1, 0)) %>%
+  mutate(lymphoma = if_else(lymphoma == "Yes", 1, 0)) %>%
+  mutate(metastasis = if_else(metastasis == "Yes", 1, 0)) %>%
+  mutate(imm_sup = if_else(imm_sup == "Yes", 1, 0)) %>%
+  mutate(onHD = if_else(onHD == "Yes", 1, 0))
+```
+
+## 対象リストの作成
+対象条件選定＋タイムスタンプの処理＋前後24h,48hのcolumn追加  
+df_icuはJIPADから生成された、病棟からの緊急入室のリスト
+```{r}
+df_icu <- df_icu_org %>% 
+  filter(adm_path == "病棟" & adm_type == "緊急"　& adult_ped_categ == "成人") %>%
+  # mutate(ADM_DT = lubridate::as_datetime (ADM_DT, origin = "1899-12-30"), tz = "Japan")
+  mutate(ADM_DT = as.POSIXct(as.Date(ADM_DT, origin = "1899-12-30"), tz = "Japan")) %>%
+  mutate(disc_u_DT = as.POSIXct(as.Date(disc_u_DT, origin = "1899-12-30"), tz = "Japan")) %>%
+  mutate(nyuin_day = as.POSIXct(as.Date(nyuin_day, origin = "1899-12-30"))) %>%
+  mutate(taiin_day = as.POSIXct(as.Date(taiin_day, origin = "1899-12-30"))) %>%
+  mutate(
+    ADM_24h_ago = ADM_DT - hours(24),
+    ADM_48h_ago = ADM_DT - hours(48)
+  )
+```
+
+```{r}
+categorical_columns <- c("e_call", "disc_outcome", "CPA", "readmission", "CHF", 
+                         "RespF", "HepatF", "cirrhosis", "AIDS", "AML_MM",
+                         "metastasis", "imm_sup", "onHD")
+
+df_icu <- df_icu %>% 
+  mutate(across(categorical_columns, as.character)) %>% 
+  mutate(across(categorical_columns, as.factor))
+```
+
+```{r}
+str(df_icu)
+```
+
+```{r}
+require(table1)
+tb_icu <- table1(~adm_categ +adm_path +adm_type +age +HT +BW +AP3score
+                 +e_call +disc_outcome +CPA +readmission +CHF +RespF
+                 +HepatF +cirrhosis +AIDS +AML_MM +metastasis
+                 +imm_sup +onHD|`gender`,
+             data=df_icu)
+tb_icu
+```
+カテゴリ変数向けに修正を  
+→263行目から、変換はしてみた、表もできた。でもなんか違う？
+
+exclude(unnecessary WARDs & SECTIONs)  
+ICU入室1日前のsectionとwardの情報を入手したい  
+また、ICU直入や、前日時点でICUにすでにいる患者は除外したい
+
+2024/04/25  ICU直接入院患者と入院後短時間での転床の除外  
+df_all_admtcとdf_icuをマージしたあと、ADM_DTとINHOSP_DATE+TIMEの比較を行い、  
+これらが完全一致、ないし時間（例えば差分が6時間以内など）で区切る処理  
+
+まずは入院当日ICUについてはJIPAD側=df_icuでの処理   
+そのごく一部の患者がICU直入かそれに準ずるかを判別する方針とする  
+```{r}
+df_direct <- df_icu %>% 
+  mutate(ADM_d = as.Date(ADM_DT)) %>%
+  filter(ADM_d == nyuin_day)
+```
+
+幸い、ADM_DTが日付変わりたての人はいない（最速AM9時台）  
+df_all_admtcとdf_icuのマージ後に時間で処理して6時間以上前？まで病棟記録が遡れる人、  
+を解析対象者と定義  
+除外対象となる入院後6時間以内のICU入室者を抽出
+```{r}
+df_detect_direct <- df_all_admtc %>% 
+  mutate(INHOSPdt = str_c(INHOSP_DATE, INHOSP_TIME, sep=" ") %>%
+        lubridate::ymd_hms()) %>% 
+  dplyr::left_join(., df_direct %>% 
+              dplyr::select(PT_ID, ADM_DT, JIPAD_ID),
+              by="PT_ID",relationship = "many-to-many") %>%
+  dplyr::select(PT_ID, ADM_DT, everything()) %>% 
+  mutate(sub_DT=ADM_DT-INHOSPdt) %>% 
+  filter(sub_DT>=0) %>% 
+  # more→less
+  mutate(lessthan_6h=sub_DT<=6*60*60) %>% 
+  dplyr::filter(lessthan_6h) %>% 
+  mutate(hour = sub_DT/3600) %>% 
+  mutate(hrs = as.numeric(hour)) %>% 
+  mutate(hrs_int = round(hrs)) %>% 
+  dplyr::select(JIPAD_ID, PT_ID, ADM_DT, INHOSPdt, lessthan_6h, hrs_int, everything())
+```
+
+```{r}
+df_icu %>% 
+  filter(!JIPAD_ID %in% unique(df_detect_direct$JIPAD_ID))
+```
+追加処理（ex_wards, ex_section)が必要 on2024/04/26 
+注意点として、以前の139、163入室という数字はdf_icuとadmtcに相当するものを  
+マージした上での数字。ここでのdf_icuは未マージ  
+と、いうことで    
+ICU入室前日のリストを作成し、除外対象上病棟の患者（入院）を除外  
+（本プロジェクトでのdf_icuは入室後6時間以内の患者を選別したい  
+が、CALENDER_DATE時点でのWARDがどこになるかは処理しきれない）
+```{r}
+df_daybefore_icu <- df_all_admtc %>% 
+  dplyr::left_join(., df_icu %>% 
+              dplyr::select(PT_ID, ADM_DT, ADM_24h_ago),
+              by="PT_ID",relationship = "many-to-many") %>% 
+  mutate(ADM_1dprev = as.Date(ADM_24h_ago)) %>% 
+  filter(ADM_1dprev ==CALENDAR_DATE) %>%
+  dplyr::select(PT_ID, ADM_1dprev, CALENDAR_DATE, everything())
+
+df_ex_wards <- df_all_admtc %>%
+  filter(WARD %in% setting_list$ex_wards) %>%
+  mutate(CALENDAR_DATE = as.Date(CALENDAR_DATE))
+
+df_ex_sects <- df_all_admtc %>%
+  filter(SECTION %in% setting_list$ex_sects) %>%
+  mutate(CALENDAR_DATE = as.Date(CALENDAR_DATE))
+
+df_direct_toicu <- df_all_admtc %>%
+  mutate(CALENDAR_DATE = as.Date(CALENDAR_DATE)) %>%
+  dplyr::anti_join(df_daybefore_icu %>%
+                     mutate(CALENDAR_DATE = as.Date(ADM_DT)),by= c("PT_ID", "CALENDAR_DATE"))
+
+df_icu_target <- df_icu %>%
+  mutate(ADM_1dprev = as.Date(ADM_24h_ago)) %>%
+  mutate(CALENDAR_DATE = as.Date(ADM_DT)) %>%
+  dplyr::anti_join(df_direct_toicu, by= c("PT_ID", "CALENDAR_DATE")) %>%
+  dplyr::anti_join(df_ex_wards, by= c("PT_ID"="PT_ID", "ADM_1dprev"="CALENDAR_DATE")) %>%
+  dplyr::anti_join(df_ex_sects, by= c("PT_ID"="PT_ID", "ADM_1dprev"="CALENDAR_DATE"))
+```
+
+```{r}
+df_icu$ADM_DT %>%
+  as.Date()
+```
+
+```{r}
+df_all_admtc$CALENDAR_DATE[1:100] %>%
+  as.Date()
+```
+
+
+```{r}
+df_all_admtc %>%
+    group_by(WARD) %>%
+    summarize(n=n()) %>%
+    arrange(-n) %>%
+  print(n =27)
+```
+# A tibble: 27 × 2
+   WARD           n
+   <chr>      <int>
+ 1 南病棟1F   52948
+ 2 南病棟6F   46229
+ 3 南病棟3F   41834
+ 4 積貞棟7F   41763
+ 5 南病棟8F   41616
+ 6 南病棟5F   37595
+ 7 積貞棟3F   37399
+ 8 積貞棟6F   37230
+ 9 南病棟7F   36117
+10 中病棟6F   34106
+11 中病棟8F   32459
+12 南病棟2F   30387
+13 積貞棟8F   28572
+14 西病棟     22483
+15 中病棟2F   21347
+16 積貞棟2F   16805
+17 北病棟2F   12373
+18 ＭＦＩＣＵ  6423
+19 北病棟4F    4619
+20 北病棟1F    2570
+21 中病棟5F    2431
+22 ＫＣＮＴ    1623
+23 南病棟4F     937
+24 積貞棟5F     794
+25 積貞棟4F     565
+26 中病棟7F     527
+27 北病棟5F     196
+そういえばp1でex_wards, ex_secsとして除外済。  
+日時のスタンプを一切考慮しないで除外したが問題無いか？
+```{r}
+f_out <- c("./dat/icu_target",ts,".rds") %>% 
+  str_c(sep="",collapse = "")
+saveRDS(df_icu_target, file = f_out)
+f_out
+```
+

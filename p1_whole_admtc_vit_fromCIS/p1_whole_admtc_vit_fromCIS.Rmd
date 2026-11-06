@@ -1,0 +1,151 @@
+---
+title: "whole_admtc_and_vit_fromCIS"
+author: "Saito"
+date: "2024-03-22"
+output: html_document
+editor_options: 
+  chunk_output_type: console
+---
+
+```{r}
+require(tidyverse)
+require(openxlsx)
+require(jsonlite)
+require(officer)
+require(ggpubr)
+require(IRdisplay)
+require(data.table)
+require(lubridate)
+require(repr)
+require(tictoc)
+```
+
+
+DWH側データの作業  
+"ADMTC"でのファイルリスト作成
+```{r}
+d_out <- "../../dat/p3_vit_parse/"
+ddir <- "../../dat/p1_pts_parse/"
+# p1_pts_parse
+lastdate <- "20221220"
+```
+
+```{r}
+ts <- Sys.time()  %>% 
+    as.character() %>% 
+    str_remove_all(., "[-:]*") %>% 
+    str_replace(.," ", "_")
+ts
+```
+
+ここ要確認 on 2024/03/28
+```{r}
+ddir <- "../../dat/p1_pts_parse/"
+fs <- list.files(ddir, pattern = "admtc*", full.names = T) %>% 
+  sort()
+fs <- fs[49:86]
+fs
+```
+
+```{r}
+df <- fread(fs[1])
+df %>%
+    dim()
+
+df <- df %>%
+    distinct()
+
+df %>%
+    dim()
+```
+
+"vit"側でファイルリスト作成
+```{r}
+ddir <- "../../dat/p1_pts_parse/"
+fs2 <- list.files(ddir, pattern = "vit*", full.names = T) %>% 
+  sort()
+fs2 <- fs2[49:86]
+fs2
+```
+
+```{r}
+df2 <- fread(fs2[1])
+df2 %>%
+    dim()
+
+df2 <- df2 %>%
+    distinct()
+
+df2 %>%
+    dim()
+```
+
+df, df2は病院全体の対象期間のadmitおよびvitのCIS側の全df  
+ただし、過去の処理ではこの後いきなりJIPAD側のPT_IDで
+絞り込みつつfsの1-86までforループで回して読み込み＆マージしていた。  
+今回処理を分けるとしたときに、上記書き方ではそうならない  
+＆fsを生成する時点で期間処理をすることにならない  
+つまりここでのdfもdf2も共に短期間細切れの患者群のみでしかない 
+→解決できた、一旦はこの方法でOKとする(on 3/29)  
+
+```{r}
+lodf <- list()
+
+for(i in 1:length(fs)) {
+  f <- fs[i]
+  print(f)
+  df_i <- fread(f)
+  df_i_f <- df_i %>%
+    mutate(ROOM = as.character(ROOM),
+           BED = as.character(BED)) %>%
+    mutate(PT_ID = sprintf("%08d", PT_ID))
+
+  lodf<- append(lodf, list(df_i_f))
+  # break()
+}
+
+df_all_admtc <- dplyr::bind_rows(lodf)
+```
+
+```{r}
+# df_all_admtc %>%
+#   filter(INHOSP_DATE_FLG == "入院") %>%
+#   nrow()
+```
+
+```{r}
+lodf <- list()
+
+for(i in 1:length(fs2)) {
+  f <- fs2[i]
+  print(f)
+  df_f <- fread(f) %>% 
+    mutate(ROOM = as.character(ROOM)) %>%
+    mutate(PT_ID = sprintf("%08d", PT_ID))
+
+  lodf<- append(lodf, list(df_f))
+  # break()
+}
+
+df_all_vit <- dplyr::bind_rows(lodf)
+```
+
+※rdsの命名
+```{r}
+f_out <- c("./dat/admtc_",ts,".rds") %>% 
+  str_c(sep="",collapse = "")
+saveRDS(df_all_admtc, file = f_out)
+f_out
+  
+f2_out <- f_out %>% 
+  str_replace("admtc","vit")
+saveRDS(df_all_vit, file = f2_out)
+f2_out
+```
+上記rdsは最初から保存先のディレクトリを指定した方が良いのか？
+あるいは手動でdatに移動すればよいのか？
+ →解決　上記コード参照(3/29)
+```{r}
+sessionInfo()
+```
+
