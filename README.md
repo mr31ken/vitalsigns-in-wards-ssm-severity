@@ -35,6 +35,7 @@ relative path. Run each file with its own folder as the working directory.
 | 2b | `p7_vit_dist_state_models_v2_compe_on_eval_fix20261001.Rmd` — same for single-channel fits | 1a full fit, 1b fits; p2 inputs | `eval_sources_model_on_add_fix.rds` | minutes |
 | 3 | `p7_final_numbers_v23.Rmd` — all reported statistics, Figs 3a/3b, ESM Figs 2/3, convergence diagnostics | 2a, 2b outputs; p2, p5 inputs | `figs_final_v23/` | minutes (+ fits for diagnostics) |
 | 4 | `value_effort_mismatch_v23.py` — Fig. 4 | `figs_final_v23/final_numbers_v23.csv` | `figs_final_v23/` | seconds |
+| 4 | `figESM_auc_bars_v23.R` — ESM Figs 2 and 3 as published (the step 3 drafts with the AUC labels kept clear of the reference line) | `figs_final_v23/final_numbers_v23.csv` | `figs_final_v23/` | seconds |
 
 \* Wall time on the original server (4 chains in parallel).
 
