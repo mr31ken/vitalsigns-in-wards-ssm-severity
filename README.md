@@ -95,7 +95,7 @@ nohup Rscript -e "rmarkdown::render('p7_vit_dist_state_models_v2_onlys_fix202609
 - **Model** (`ssm_801_4_redvar_rs.stan`): one latent severity per admission × measurement time; a random walk whose step SD is proportional to √(elapsed days); each normalized value ~ Normal(a<sub>k</sub> × severity, σ), with channel coefficients a<sub>k</sub> averaging 1. Sampling: 4 chains × 5,000 iterations (3,000 warm-up), adapt_delta 0.90, max_treedepth 15, seed 12345.
 - **Exposure** (`..._compe_eval_fix20260930.Rmd`, lines 353–368): in the 24 h before ICU admission, the posterior-mean severity of each record is weighted by the time to the next measurement (the last by the time to ICU admission) and averaged per admission.
 - **Outcome**: death within 30 days of ICU admission.
-- **Statistics** (`p7_final_numbers_v23.Rmd`): AUC from the fitted probabilities of a univariable logistic regression (ROCR), DeLong 95 % CI (pROC); odds ratio per 1 SD with patient-level cluster-robust standard errors (sandwich); patient-level cluster bootstrap (2,000 resamples, seed 42); first-admission-only analysis; comparison with an abbreviated APACHE II physiology score from the same four vital signs (aPS-4, last value within 3 h and 12 h, missing = 0), DeLong test.
+- **Statistics** (`p7_final_numbers_v23.Rmd`): AUC from the fitted probabilities of a univariable logistic regression (ROCR), DeLong 95 % CI (pROC); odds ratio per 1 SD with patient-level cluster-robust standard errors (sandwich); patient-level cluster bootstrap (2,000 resamples, seed 42); first-admission-only analysis; comparison with an abbreviated APACHE II physiology score from the same four vital signs (aPS-4, last value within 3 h and 12 h, missing = 0; mean blood pressure only from records with both systolic and diastolic pressure, as in the model), DeLong test.
 
 ## Software
 
@@ -105,17 +105,22 @@ and ggplot2 3.4.4 for step 3; Python 3 with matplotlib for step 4. Part A also u
 (several other packages are loaded by `require()` but not needed). Steps 1–3 were run on
 RStudio Server 2023.09.0+463 / JupyterLab 4.3.5 (Ubuntu 22.04).
 
-The numbers in the article come from the step 3 run of 2026-11-06, whose inputs were
-`eval_sources_model_fix20260930.rds` (MD5 8a6228457debe503fe01188de6fa76c9) and
-`eval_sources_model_on_add_fix.rds` (MD5 8d3f50252de1f91407bd8144015ccc66). In that run all
-nine fits had R-hat ≤ 1.003 and n_eff ≥ 1,100 for every parameter, with no divergent
-transitions.
+The numbers in the article come from the step 3 run of 2026-11-07, whose inputs were
+`eval_sources_model_fix20260930.rds` (MD5 8a6228457debe503fe01188de6fa76c9),
+`eval_sources_model_on_add_fix.rds` (MD5 8d3f50252de1f91407bd8144015ccc66) and
+`df_j20261106_183454.947914.rds` (MD5 ef0c6009f28ae8730afb3e9e2b991b0d). An earlier run
+(2026-11-06) used the first version of `df_j` (see `p5_build_df_j.R`); the 2026-11-07 run
+reproduced all of its numbers exactly except those for aPS-4. The convergence diagnostics are
+from the 2026-11-06 run (the 2026-11-07 run skipped that section): all nine fits had
+R-hat ≤ 1.003 and n_eff ≥ 1,100 for every parameter, with no divergent transitions.
 
 Part A was checked on 2026-11-07 by re-running it on a copy of the stored inputs: A1 and A2
 reproduced `admtc`, `vit`, `setting` and `ir_admtc` exactly; A3 selected the same 160
 admissions as `icu_target20240517_044716.297905.rds` (with the current ICU records, four
-later-completed columns differ; see `p2_*/dat/README.md`); A4 reproduced
-`df_j20240524_052253.rds` (all values equal).
+later-completed columns differ; see `p2_*/dat/README.md`); A4, with the mean
+blood pressure step of the first version (see its header), reproduced `df_j20240524_052253.rds`
+(all values equal); as published, it writes the file used in the article, which differs only
+by the absence of the 31 rows from records with one blood pressure side missing.
 
 **Changes to the authors' files.** `p1_whole_admtc_vit_fromCIS.Rmd`: paths on the
 institutional file server replaced by the equivalent relative path `../../dat/`.

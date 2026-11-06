@@ -45,7 +45,7 @@ cfg <- list(
   ts_ex   = "20260929_100700.473068",
   ts_on   = "20260930_004943.381441",
   f_icu   = "../p2_unplanned_ICUadmission/dat/icu_target20240517_044716.297905.rds",
-  f_p5    = "../p5_vit_dist_inhosp/dat/df_j20240524_052253.rds",
+  f_p5    = "../p5_vit_dist_inhosp/dat/df_j20261106_183454.947914.rds",  # 2026-11-07; mean BP from complete records
   out     = "./figs_final_v23",
   check_against_html = TRUE,   # AUCs must equal those printed in the 10/1 HTMLs
   run_convergence    = TRUE,   # reads the nine fits (slow)
