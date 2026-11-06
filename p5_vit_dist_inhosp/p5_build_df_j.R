@@ -10,9 +10,10 @@
 # it reproduced df_j20240524_052253.rds (18,166 rows; all values equal).
 #
 # Note: mean blood pressure is computed here as BPL + (BPH - BPL) / 3 even when only one of systolic
-# (BPH) or diastolic (BPL) pressure was recorded (the other stored as 0); this gives 31 implausibly low
-# values in df_j. The state-space model does not use df_j (p7 sets mean pressure to 0, i.e. missing,
-# in that case).
+# (BPH) or diastolic (BPL) pressure was recorded and the other is stored as 0. For those 13 measurements
+# (31 rows of df_j, which repeats some measurements) the value is two-thirds of the diastolic or one-third
+# of the systolic pressure, not a mean pressure. The state-space model does not use df_j (p7 sets mean
+# pressure to 0, i.e. missing, in that case).
 #
 # Run with this folder (p5_vit_dist_inhosp/) as the working directory:
 #   Rscript p5_build_df_j.R
