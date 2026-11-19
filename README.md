@@ -5,7 +5,7 @@
 Analysis code for:
 
 > Saito K, Fukuyama K, Mori Y, Ueshima H, Tsutsumi T, Takeda C, Kai S, Kuroda T.
-> *Estimating the Effect of Respiratory Rate on Patient Condition Using a State–Space Model in a University Hospital Setting.*
+> *Estimating the Association Between Respiratory Rate and Patient Condition Using a State–Space Model in a University Hospital Setting.*
 > Submitted to the Journal of Anesthesia.
 
 A Bayesian state–space model estimates a latent severity from irregularly recorded
